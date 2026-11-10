@@ -24,6 +24,7 @@ jobs:
             throw "Windows .NET Framework C# compiler not found: $csc"
           }
           & $csc /nologo /target:winexe /platform:anycpu /optimize+ /codepage:65001 `
+            /win32icon:"assets\typebridge.ico" `
             /out:"TypeBridge.exe" `
             /reference:System.dll `
             /reference:System.Drawing.dll `

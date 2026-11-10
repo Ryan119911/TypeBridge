@@ -1,5 +1,7 @@
 # TypeBridge
 
+<img src="assets/typebridge-128.png" width="96" alt="TypeBridge icon">
+
 **在 Windows 上直接打字，把键盘输入实时发送到 Ubuntu 当前焦点窗口。**
 
 TypeBridge 是一个无窗口、托盘常驻的 Windows 输入桥。它只转发键盘输入，不传画面、不控制鼠标。中文不在 Windows 端提交，而是把拼音和候选选择键送到 Ubuntu，由 **Ubuntu 输入法**完成组词和选字。
@@ -293,13 +295,13 @@ Windows 端使用低级键盘钩子：
 在 Ubuntu 上执行：
 
 ```bash
-VERSION=3.2.0 bash ubuntu/build-deb.sh
+VERSION=3.2.1 bash ubuntu/build-deb.sh
 ```
 
 生成：
 
 ```text
-dist/typebridge_3.2.0_all.deb
+dist/typebridge_3.2.1_all.deb
 ```
 
 安装包包含 GTK 设置页、Ubuntu 服务端、桌面菜单入口和 systemd 用户服务。

@@ -434,7 +434,13 @@ $exitItem.Text = "退出 TypeBridge"
 [void]$menu.Items.Add($exitItem)
 
 $tray = New-Object System.Windows.Forms.NotifyIcon
-$tray.Icon = [System.Drawing.SystemIcons]::Application
+$iconPath = Join-Path $PSScriptRoot "assets\typebridge.ico"
+if (Test-Path $iconPath) {
+    $appIcon = New-Object System.Drawing.Icon -ArgumentList $iconPath
+} else {
+    $appIcon = [System.Drawing.SystemIcons]::Application
+}
+$tray.Icon = $appIcon
 $tray.ContextMenuStrip = $menu
 $tray.Visible = $true
 
@@ -442,11 +448,9 @@ function Update-Status {
     if ($script:ubuntuMode) {
         $conn = if ($script:stream) { "已连接" } else { "未连接" }
         $tray.Text = "TypeBridge → Ubuntu ($conn)"
-        $tray.Icon = [System.Drawing.SystemIcons]::Information
         $toggleItem.Text = "切换到 Windows`tCtrl+Alt+U"
     } else {
         $tray.Text = "TypeBridge → Windows"
-        $tray.Icon = [System.Drawing.SystemIcons]::Application
         $toggleItem.Text = "切换到 Ubuntu`tCtrl+Alt+U"
     }
 }
@@ -516,6 +520,7 @@ function Show-SettingsDialog([bool]$firstRun) {
     $dialog.MinimizeBox = $false
     $dialog.ShowInTaskbar = $false
     $dialog.TopMost = $true
+    $dialog.Icon = $appIcon
     $dialog.ClientSize = New-Object System.Drawing.Size(420, 220)
 
     $hostLbl = New-Object System.Windows.Forms.Label
