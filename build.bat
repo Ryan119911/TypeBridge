@@ -8,7 +8,7 @@ if not exist "%CSC%" (
     exit /b 1
 )
 
-"%CSC%" /nologo /target:winexe /platform:anycpu /optimize+ /codepage:65001 /out:"%~dp0TypeBridge.exe" /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll "%~dp0TypeBridge.cs"
+"%CSC%" /nologo /target:winexe /platform:anycpu /optimize+ /codepage:65001 /win32icon:"%~dp0assets\typebridge.ico" /out:"%~dp0TypeBridge.exe" /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll "%~dp0TypeBridge.cs"
 if errorlevel 1 (
     echo Build failed.
     pause

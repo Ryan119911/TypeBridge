@@ -87,7 +87,7 @@ class TypeBridgeWindow(Gtk.Window):
         super().__init__(title="TypeBridge")
         self.set_default_size(720, 650)
         self.set_size_request(640, 560)
-        self.set_icon_name("input-keyboard")
+        self.set_icon_name("typebridge")
         self.set_position(Gtk.WindowPosition.CENTER)
 
         self.config = load_config()

@@ -12,7 +12,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.1.0.0")]
+[assembly: AssemblyVersion("3.2.1.0")]
 
 namespace TypeBridgeApp
 {
@@ -533,6 +533,9 @@ namespace TypeBridgeApp
             Host = host;
             Port = port;
 
+            try { Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath); }
+            catch { }
+
             Text = firstRun ? "TypeBridge 首次设置" : "TypeBridge 设置";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             StartPosition = FormStartPosition.CenterScreen;
@@ -619,7 +622,7 @@ namespace TypeBridgeApp
         private readonly GlobalKeyboardHook hook = new GlobalKeyboardHook();
         private readonly NotifyIcon tray = new NotifyIcon();
         private readonly ToastForm toast = new ToastForm();
-        private readonly ContextMenuStrip trayMenu = new ContextMenuStrip();
+        private readonly Icon appIcon;        private readonly ContextMenuStrip trayMenu = new ContextMenuStrip();
         private readonly ToolStripMenuItem toggleItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem settingsItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem exitItem = new ToolStripMenuItem();
@@ -638,6 +641,7 @@ namespace TypeBridgeApp
         internal BridgeApplicationContext()
         {
             LoadConfiguration();
+            appIcon = LoadAppIcon();
 
             hotkeyForm.ShowInTaskbar = false;
             hotkeyForm.Visible = false;
@@ -661,7 +665,7 @@ namespace TypeBridgeApp
             trayMenu.Items.Add(exitItem);
 
             tray.ContextMenuStrip = trayMenu;
-            tray.Icon = SystemIcons.Application;
+            tray.Icon = appIcon;
             tray.DoubleClick += delegate { ToggleMode(); };
             tray.Visible = true;
 
@@ -677,6 +681,28 @@ namespace TypeBridgeApp
             {
                 hotkeyForm.BeginInvoke(new Action(delegate { ShowSettings(true); }));
             }
+        }
+
+        private static Icon LoadAppIcon()
+        {
+            try
+            {
+                Icon embedded = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                if (embedded != null)
+                    return embedded;
+            }
+            catch { }
+
+            try
+            {
+                string iconPath = System.IO.Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory, "assets", "typebridge.ico");
+                if (System.IO.File.Exists(iconPath))
+                    return new Icon(iconPath);
+            }
+            catch { }
+
+            return SystemIcons.Application;
         }
 
         private void LoadConfiguration()
@@ -785,13 +811,11 @@ namespace TypeBridgeApp
             if (ubuntuMode)
             {
                 tray.Text = stream != null ? "TypeBridge → Ubuntu（已连接）" : "TypeBridge → Ubuntu（未连接）";
-                tray.Icon = SystemIcons.Information;
                 toggleItem.Text = "切换到 Windows\tCtrl+Alt+U";
             }
             else
             {
                 tray.Text = "TypeBridge → Windows";
-                tray.Icon = SystemIcons.Application;
                 toggleItem.Text = "切换到 Ubuntu\tCtrl+Alt+U";
             }
         }

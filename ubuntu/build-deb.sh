@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${VERSION:-3.2.0}"
+VERSION="${VERSION:-3.2.1}"
 BUILD="$(mktemp -d)"
 trap 'rm -rf "$BUILD"' EXIT
 
@@ -12,13 +12,21 @@ mkdir -p \
     "$PKG/usr/lib/typebridge" \
     "$PKG/usr/bin" \
     "$PKG/usr/share/applications" \
-    "$PKG/usr/lib/systemd/user"
+    "$PKG/usr/lib/systemd/user" \
+    "$PKG/usr/share/icons/hicolor"
 
 install -m 755 "$ROOT/typebridge-ubuntu.py" "$PKG/usr/lib/typebridge/typebridge-ubuntu.py"
 install -m 755 "$ROOT/ubuntu/typebridge-ui.py" "$PKG/usr/lib/typebridge/typebridge-ui.py"
 install -m 755 "$ROOT/ubuntu/typebridge-ui" "$PKG/usr/bin/typebridge-ui"
 install -m 644 "$ROOT/ubuntu/typebridge.desktop" "$PKG/usr/share/applications/typebridge.desktop"
 install -m 644 "$ROOT/ubuntu/typebridge.service" "$PKG/usr/lib/systemd/user/typebridge.service"
+
+for size in 16 32 48 64 128 256 512; do
+    install -Dm644 "$ROOT/assets/typebridge-${size}.png" \
+        "$PKG/usr/share/icons/hicolor/${size}x${size}/apps/typebridge.png"
+done
+install -Dm644 "$ROOT/assets/typebridge.svg" \
+    "$PKG/usr/share/icons/hicolor/scalable/apps/typebridge.svg"
 
 cat > "$PKG/DEBIAN/control" <<EOF
 Package: typebridge
@@ -40,6 +48,9 @@ cat > "$PKG/DEBIAN/postinst" <<'EOF'
 set -e
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --global enable typebridge.service >/dev/null 2>&1 || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
 fi
 exit 0
 EOF
