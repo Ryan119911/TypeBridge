@@ -419,6 +419,31 @@ namespace TypeBridgeApp
         }
     }
 
+    /// <summary>按系统 DPI 换算窗体布局。纯代码创建的窗体不会自动缩放。</summary>
+    internal static class UiScale
+    {
+        internal static readonly float Factor = Detect();
+
+        private static float Detect()
+        {
+            try
+            {
+                using (Graphics g = Graphics.FromHwnd(IntPtr.Zero))
+                {
+                    if (g.DpiX > 0f)
+                        return g.DpiX / 96f;
+                }
+            }
+            catch { }
+            return 1f;
+        }
+
+        internal static int S(int value)
+        {
+            return (int)Math.Round(value * Factor);
+        }
+    }
+
     internal sealed class ToastForm : Form
     {
         private readonly Label titleLabel = new Label();
@@ -431,20 +456,18 @@ namespace TypeBridgeApp
             ShowInTaskbar = false;
             TopMost = true;
             StartPosition = FormStartPosition.Manual;
-            AutoScaleDimensions = new SizeF(96F, 96F);
-            AutoScaleMode = AutoScaleMode.Dpi;
-            ClientSize = new Size(380, 84);
+            ClientSize = new Size(UiScale.S(380), UiScale.S(84));
             BackColor = Color.FromArgb(30, 30, 30);
             Opacity = 0.96;
 
             titleLabel.AutoSize = false;
-            titleLabel.SetBounds(16, 10, 348, 20);
+            titleLabel.SetBounds(UiScale.S(16), UiScale.S(10), UiScale.S(348), UiScale.S(20));
             titleLabel.ForeColor = Color.Silver;
             titleLabel.Font = new Font("Microsoft YaHei", 9F);
             titleLabel.Text = "TypeBridge";
 
             messageLabel.AutoSize = false;
-            messageLabel.SetBounds(16, 32, 348, 38);
+            messageLabel.SetBounds(UiScale.S(16), UiScale.S(32), UiScale.S(348), UiScale.S(38));
             messageLabel.ForeColor = Color.White;
             messageLabel.Font = new Font("Microsoft YaHei", 11F, FontStyle.Bold);
             messageLabel.AutoEllipsis = true;
@@ -483,8 +506,8 @@ namespace TypeBridgeApp
 
             Rectangle workArea = Screen.FromPoint(Cursor.Position).WorkingArea;
             Location = new Point(
-                workArea.Right - Width - 24,
-                workArea.Bottom - Height - 24);
+                workArea.Right - Width - UiScale.S(24),
+                workArea.Bottom - Height - UiScale.S(24));
 
             hideTimer.Stop();
             hideTimer.Start();
@@ -1262,42 +1285,39 @@ namespace TypeBridgeApp
             MinimizeBox = false;
             ShowInTaskbar = false;
             TopMost = true;
-            // 代码创建的窗体默认不做 DPI 缩放；显式声明 96 DPI 基准后，
-            // 高缩放屏幕上控件和文字才会按比例放大，避免文字被截断。
-            AutoScaleDimensions = new SizeF(96F, 96F);
-            AutoScaleMode = AutoScaleMode.Dpi;
-            ClientSize = new Size(460, 410);
+            // 纯代码创建的窗体不会自动缩放，按系统 DPI 手动换算，避免高缩放下文字截断。
+            ClientSize = new Size(UiScale.S(460), UiScale.S(410));
 
             Label hostLabel = new Label();
             hostLabel.Text = "Ubuntu 地址（Tailscale IP、局域网 IP 或主机名）";
             hostLabel.AutoSize = true;
-            hostLabel.Location = new Point(16, 14);
+            hostLabel.Location = new Point(UiScale.S(16), UiScale.S(14));
 
             hostBox.Text = host;
-            hostBox.SetBounds(16, 40, 428, 26);
+            hostBox.SetBounds(UiScale.S(16), UiScale.S(40), UiScale.S(428), UiScale.S(26));
             hostBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
             Label portLabel = new Label();
             portLabel.Text = "端口";
             portLabel.AutoSize = true;
-            portLabel.Location = new Point(16, 78);
+            portLabel.Location = new Point(UiScale.S(16), UiScale.S(78));
 
             portBox.Text = port.ToString();
-            portBox.SetBounds(16, 102, 90, 26);
+            portBox.SetBounds(UiScale.S(16), UiScale.S(102), UiScale.S(90), UiScale.S(26));
 
             Label hint = new Label();
             hint.Text = "默认 4321；请填写你自己的 Ubuntu 地址。";
             hint.AutoSize = true;
             hint.ForeColor = Color.Gray;
-            hint.Location = new Point(120, 106);
+            hint.Location = new Point(UiScale.S(120), UiScale.S(106));
 
             GroupBox hotkeyGroup = new GroupBox();
             hotkeyGroup.Text = "切换快捷键";
-            hotkeyGroup.SetBounds(16, 140, 428, 158);
+            hotkeyGroup.SetBounds(UiScale.S(16), UiScale.S(140), UiScale.S(428), UiScale.S(158));
 
             linkBox.Text = "键盘和鼠标一起切换（推荐）";
             linkBox.Checked = linkMouse;
-            linkBox.SetBounds(14, 18, 390, 24);
+            linkBox.SetBounds(UiScale.S(14), UiScale.S(18), UiScale.S(390), UiScale.S(24));
             linkBox.CheckedChanged += delegate
             {
                 mouseBox.Enabled = !linkBox.Checked;
@@ -1307,16 +1327,16 @@ namespace TypeBridgeApp
             Label keyboardLabel = new Label();
             keyboardLabel.Text = "键盘快捷键";
             keyboardLabel.AutoSize = true;
-            keyboardLabel.Location = new Point(14, 50);
+            keyboardLabel.Location = new Point(UiScale.S(14), UiScale.S(50));
 
-            keyboardBox.SetBounds(104, 46, 190, 26);
+            keyboardBox.SetBounds(UiScale.S(104), UiScale.S(46), UiScale.S(190), UiScale.S(26));
             keyboardBox.Value = keyboardHotkey;
 
             mouseLabel.Text = "鼠标快捷键";
             mouseLabel.AutoSize = true;
-            mouseLabel.Location = new Point(14, 84);
+            mouseLabel.Location = new Point(UiScale.S(14), UiScale.S(84));
 
-            mouseBox.SetBounds(104, 80, 190, 26);
+            mouseBox.SetBounds(UiScale.S(104), UiScale.S(80), UiScale.S(190), UiScale.S(26));
             mouseBox.Value = mouseHotkey;
             mouseBox.Enabled = !linkMouse;
             mouseLabel.Enabled = !linkMouse;
@@ -1324,7 +1344,7 @@ namespace TypeBridgeApp
             Label hint2 = new Label();
             hint2.Text = "点击输入框后按下组合键，至少包含 Ctrl、Alt 或 Shift；取消联动后鼠标快捷键才生效。";
             hint2.AutoSize = false;
-            hint2.SetBounds(14, 114, 400, 38);
+            hint2.SetBounds(UiScale.S(14), UiScale.S(114), UiScale.S(400), UiScale.S(38));
             hint2.ForeColor = Color.Gray;
 
             hotkeyGroup.Controls.Add(linkBox);
@@ -1335,17 +1355,17 @@ namespace TypeBridgeApp
             hotkeyGroup.Controls.Add(hint2);
 
             errorLabel.AutoSize = false;
-            errorLabel.SetBounds(16, 306, 428, 40);
+            errorLabel.SetBounds(UiScale.S(16), UiScale.S(306), UiScale.S(428), UiScale.S(40));
             errorLabel.ForeColor = Color.Firebrick;
 
             Button cancelButton = new Button();
             cancelButton.Text = "取消";
             cancelButton.DialogResult = DialogResult.Cancel;
-            cancelButton.SetBounds(252, 358, 84, 30);
+            cancelButton.SetBounds(UiScale.S(252), UiScale.S(358), UiScale.S(84), UiScale.S(30));
 
             Button saveButton = new Button();
             saveButton.Text = "保存";
-            saveButton.SetBounds(344, 358, 100, 30);
+            saveButton.SetBounds(UiScale.S(344), UiScale.S(358), UiScale.S(100), UiScale.S(30));
             saveButton.Click += delegate
             {
                 errorLabel.Text = string.Empty;
