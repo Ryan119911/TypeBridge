@@ -38,7 +38,7 @@ ROUTES_FILE = os.path.join(CONF_DIR, "routes.json")
 DEFAULT_CONF = {
     "bind": "0.0.0.0",
     "port": 4321,
-    "auto_deactivate_fcitx": True,   # 打字前若 fcitx 处于中文态则自动切回英文直通
+    "auto_deactivate_fcitx": False,  # 本项目的拼音由 Ubuntu 输入法处理，不能自动关闭 fcitx
     "xdotool_delay_ms": 5,           # ASCII 逐字间隔
 }
 
