@@ -12,7 +12,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.3.0.0")]
+[assembly: AssemblyVersion("3.3.1.0")]
 
 namespace TypeBridgeApp
 {
@@ -1008,8 +1008,28 @@ namespace TypeBridgeApp
         private bool hasRestore;
         private bool pinned;
 
-        internal bool Enabled { get; set; }
-        internal bool Connected { get; set; }
+        private bool enabled;
+        private bool connected;
+
+        internal bool Enabled
+        {
+            get { return enabled; }
+            set
+            {
+                enabled = value;
+                UpdateTimer();
+            }
+        }
+
+        internal bool Connected
+        {
+            get { return connected; }
+            set
+            {
+                connected = value;
+                UpdateTimer();
+            }
+        }
 
         internal event EventHandler<BridgeMouseMoveEventArgs> Moved;
         internal event EventHandler<BridgeMouseButtonEventArgs> Button;
@@ -1027,7 +1047,25 @@ namespace TypeBridgeApp
 
         private bool Active
         {
-            get { return Enabled && Connected && hook != IntPtr.Zero; }
+            get { return enabled && connected && hook != IntPtr.Zero; }
+        }
+
+        /// <summary>只在「已接管且连接正常」时跑合并定时器，其余时间挂起，避免空转唤醒 CPU。</summary>
+        private void UpdateTimer()
+        {
+            bool shouldRun = Active;
+            if (shouldRun == flushTimer.Enabled)
+                return;
+            if (shouldRun)
+            {
+                flushTimer.Start();
+                return;
+            }
+            // 停表前把残留位移发出去，避免最后一小段移动被吞掉
+            Flush();
+            flushTimer.Stop();
+            pendingDx = 0;
+            pendingDy = 0;
         }
 
         /// <summary>位移合并频率。默认 250Hz，可在 typebridge.ini 里用 mouse_hz 配到 1000Hz。</summary>
@@ -1050,7 +1088,7 @@ namespace TypeBridgeApp
             hook = SetWindowsHookEx(WhMouseLl, callback, GetModuleHandle(null), 0);
             if (hook == IntPtr.Zero)
                 throw new Win32Exception(Marshal.GetLastWin32Error());
-            flushTimer.Start();
+            UpdateTimer();
         }
 
         /// <summary>接管瞬间把光标钉到屏幕中心，避免锚点贴近屏幕边缘丢位移。</summary>
