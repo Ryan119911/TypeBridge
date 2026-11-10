@@ -2,6 +2,14 @@
 
 TypeBridge 把 Windows 上的按键转发到 Ubuntu 当前焦点窗口。程序只常驻系统托盘，没有输入窗口；拼音输入和候选选字都由 **Ubuntu 输入法**完成。
 
+## 下载
+
+Windows EXE：
+
+https://github.com/Ryan119911/TypeBridge/releases/latest
+
+每台 Windows 都填写自己的 Ubuntu IP，不会连接到发布者的电脑。
+
 ## 1. 工作方式
 
 ```text
