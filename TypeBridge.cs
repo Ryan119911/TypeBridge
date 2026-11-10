@@ -21,19 +21,70 @@ namespace TypeBridgeApp
         [STAThread]
         private static void Main()
         {
-            bool created;
-            using (System.Threading.Mutex mutex = new System.Threading.Mutex(
-                true, "Local\\TypeBridge-SingleInstance-7C4A", out created))
+            try
             {
-                if (!created)
-                    return;
-                Application.EnableVisualStyles();
-                Application.SetCompatibleTextRenderingDefault(false);
-                using (BridgeApplicationContext context = new BridgeApplicationContext())
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+                Application.ThreadException += delegate(object sender, System.Threading.ThreadExceptionEventArgs e)
                 {
-                    Application.Run(context);
+                    LogException(e.Exception);
+                };
+                AppDomain.CurrentDomain.UnhandledException += delegate(object sender, UnhandledExceptionEventArgs e)
+                {
+                    LogException(e.ExceptionObject as Exception);
+                };
+
+                bool created;
+                using (System.Threading.Mutex mutex = new System.Threading.Mutex(
+                    true, "Local\\TypeBridge-SingleInstance-7C4A", out created))
+                {
+                    if (!created)
+                        return;
+
+                    Application.EnableVisualStyles();
+                    Application.SetCompatibleTextRenderingDefault(false);
+                    using (BridgeApplicationContext context = new BridgeApplicationContext())
+                    {
+                        Application.Run(context);
+                    }
                 }
             }
+            catch (Exception ex)
+            {
+                LogException(ex);
+                MessageBox.Show(
+                    "TypeBridge 启动失败：\r\n" + ex.Message,
+                    "TypeBridge",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
+        private static void LogException(Exception ex)
+        {
+            if (ex == null)
+                return;
+            try
+            {
+                string path = System.IO.Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory, "typebridge-error.log");
+                System.IO.File.AppendAllText(
+                    path,
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "\r\n" + ex + "\r\n\r\n");
+            }
+            catch { }
+        }
+
+        internal static void LogInfo(string message)
+        {
+            try
+            {
+                string path = System.IO.Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory, "typebridge-error.log");
+                System.IO.File.AppendAllText(
+                    path,
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " INFO " + message + "\r\n");
+            }
+            catch { }
         }
     }
 
@@ -681,6 +732,7 @@ namespace TypeBridgeApp
             {
                 hotkeyForm.BeginInvoke(new Action(delegate { ShowSettings(true); }));
             }
+            Program.LogInfo("started, icon=" + (appIcon == null ? "null" : "ok"));
         }
 
         private static Icon LoadAppIcon()
@@ -905,6 +957,7 @@ namespace TypeBridgeApp
 
         protected override void ExitThreadCore()
         {
+            Program.LogInfo("ExitThreadCore");
             if (!disposed)
             {
                 disposed = true;
