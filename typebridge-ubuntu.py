@@ -53,7 +53,7 @@ KEYMAP = {
     "Prior": "Prior", "Next": "Next",
     "PageUp": "Prior", "PageDown": "Next",
     "Page_Up": "Prior", "Page_Down": "Next",
-    "Space": "space",
+    "Space": "space", "space": "space",
     "Insert": "Insert",
     "semicolon": "semicolon", "slash": "slash", "grave": "grave",
     "bracketleft": "bracketleft", "bracketright": "bracketright",
@@ -76,6 +76,9 @@ for _letter in "abcdefghijklmnopqrstuvwxyz":
 
 for _digit in "0123456789":
     KEYMAP[_digit] = _digit
+
+KEYMAP_CASEFOLD = {name.lower(): value for name, value in KEYMAP.items()}
+
 
 def normalize_key(payload):
     """把 K 协议负载规范化成 xdotool key 字符串。
@@ -100,6 +103,8 @@ def normalize_key(payload):
         modifiers.append(modifier)
 
     base = KEYMAP.get(parts[-1])
+    if base is None:
+        base = KEYMAP_CASEFOLD.get(parts[-1].lower())
     if base is None:
         return None
 

@@ -216,6 +216,7 @@ Windows 端使用低级键盘钩子：
 | `K Up / Down / Left / Right` | 方向键 |
 | `K Prior / Next` | PageUp / PageDown |
 | `K Escape / Tab / Insert` | Esc、Tab、Insert |
+| `K Space` | 空格，大小写键名均可 |
 | `K ctrl+a` / `K alt+b` / `K super+e` | 组合键，支持 `ctrl / alt / shift / super` |
 | `PING` | 连通性测试，返回 `PONG` |
 | `QUIT` | 断开连接 |
