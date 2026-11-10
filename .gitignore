@@ -1,6 +1,9 @@
 # 本机配置，包含个人网络地址，不提交
 typebridge.ini
 
+# 运行时异常日志
+typebridge-error.log
+
 # 本地构建产物
 *.exe
 *.deb
