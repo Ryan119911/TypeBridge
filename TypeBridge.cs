@@ -21,6 +21,12 @@ namespace TypeBridgeApp
         [DllImport("user32.dll")]
         private static extern bool SetProcessDPIAware();
 
+        [DllImport("winmm.dll")]
+        private static extern uint timeBeginPeriod(uint period);
+
+        [DllImport("winmm.dll")]
+        private static extern uint timeEndPeriod(uint period);
+
         [STAThread]
         private static void Main()
         {
@@ -45,6 +51,8 @@ namespace TypeBridgeApp
 
                     // 鼠标钩子拿到的是物理像素坐标，声明 DPI 感知后才能和光标坐标对齐
                     try { SetProcessDPIAware(); } catch { }
+                    // WinForms 定时器默认按 15.6ms 计时，提到 1ms 才能跑 250Hz 的位移合并
+                    try { timeBeginPeriod(1); } catch { }
                     Application.EnableVisualStyles();
                     Application.SetCompatibleTextRenderingDefault(false);
                     using (BridgeApplicationContext context = new BridgeApplicationContext())
@@ -61,6 +69,10 @@ namespace TypeBridgeApp
                     "TypeBridge",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
+            }
+            finally
+            {
+                try { timeEndPeriod(1); } catch { }
             }
         }
 
@@ -924,7 +936,7 @@ namespace TypeBridgeApp
         private const int WmXButtonDown = 0x020B;
         private const int WmXButtonUp = 0x020C;
         private const int WmMouseHWheel = 0x020E;
-        private const int FlushIntervalMs = 16;
+        private const int FlushIntervalMs = 4;
         private const int MaxStep = 2000;
 
         [StructLayout(LayoutKind.Sequential)]
@@ -991,6 +1003,19 @@ namespace TypeBridgeApp
         private bool Active
         {
             get { return Enabled && Connected && hook != IntPtr.Zero; }
+        }
+
+        /// <summary>位移合并频率。默认 250Hz，可在 typebridge.ini 里用 mouse_hz 配到 1000Hz。</summary>
+        internal void SetRate(int hz)
+        {
+            if (hz < 50)
+                hz = 50;
+            if (hz > 1000)
+                hz = 1000;
+            int interval = 1000 / hz;
+            if (interval < 1)
+                interval = 1;
+            flushTimer.Interval = interval;
         }
 
         internal void Install()
@@ -1423,6 +1448,7 @@ namespace TypeBridgeApp
         private NetworkStream stream;
         private string ip = "127.0.0.1";
         private int port = 4321;
+        private int mouseHz = 250;
         private Hotkey keyboardHotkey = Hotkey.DefaultKeyboard();
         private Hotkey mouseHotkey = Hotkey.DefaultMouse();
         private bool linkMouse = true;
@@ -1453,6 +1479,7 @@ namespace TypeBridgeApp
             mouseHook.Button += HookMouseButton;
             mouseHook.Wheel += HookMouseWheel;
             mouseHook.Install();
+            mouseHook.SetRate(mouseHz);
             mouseHook.Enabled = false;
 
             toggleItem.Click += delegate { ToggleKeyboardMode(); };
@@ -1553,6 +1580,12 @@ namespace TypeBridgeApp
                         int configuredPort;
                         if (int.TryParse(value, out configuredPort) && configuredPort > 0 && configuredPort <= 65535)
                             port = configuredPort;
+                    }
+                    if (key == "mouse_hz")
+                    {
+                        int configuredHz;
+                        if (int.TryParse(value, out configuredHz) && configuredHz >= 50 && configuredHz <= 1000)
+                            mouseHz = configuredHz;
                     }
                     if (key == "keyboard_hotkey")
                         keyboardHotkey = Hotkey.Parse(value, keyboardHotkey);
@@ -1807,6 +1840,8 @@ namespace TypeBridgeApp
             try
             {
                 candidate = new TcpClient();
+                // 小包即时发送，否则 Nagle 会攒到 ACK 才走，鼠标位移会明显发黏
+                candidate.NoDelay = true;
                 if (candidate.ConnectAsync(ip, port).Wait(400))
                 {
                     client = candidate;
