@@ -51,6 +51,7 @@ Windows 键盘
 | `启动输入桥.vbs` | 无终端启动 PowerShell 版，推荐立即使用 |
 | `启动输入桥.bat` | 有 EXE 时启动 EXE，否则调用 VBS |
 | `typebridge.ini` | 可选配置，覆盖 Ubuntu IP 和端口 |
+| `typebridge.example.ini` | 配置模板；复制为 `typebridge.ini` 后填写自己的 Ubuntu 地址 |
 | `README.md` | 本说明 |
 
 ## 3. 立即使用
