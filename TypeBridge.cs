@@ -82,6 +82,80 @@ namespace TypeBridgeApp
         }
     }
 
+    internal sealed class ToastForm : Form
+    {
+        private readonly Label titleLabel = new Label();
+        private readonly Label messageLabel = new Label();
+        private readonly Timer hideTimer = new Timer();
+
+        internal ToastForm()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+            ClientSize = new Size(380, 84);
+            BackColor = Color.FromArgb(30, 30, 30);
+            Opacity = 0.96;
+
+            titleLabel.AutoSize = false;
+            titleLabel.SetBounds(16, 10, 348, 20);
+            titleLabel.ForeColor = Color.Silver;
+            titleLabel.Font = new Font("Microsoft YaHei", 9F);
+            titleLabel.Text = "TypeBridge";
+
+            messageLabel.AutoSize = false;
+            messageLabel.SetBounds(16, 32, 348, 38);
+            messageLabel.ForeColor = Color.White;
+            messageLabel.Font = new Font("Microsoft YaHei", 11F, FontStyle.Bold);
+            messageLabel.AutoEllipsis = true;
+
+            hideTimer.Interval = 1400;
+            hideTimer.Tick += delegate
+            {
+                hideTimer.Stop();
+                Hide();
+            };
+
+            Controls.Add(titleLabel);
+            Controls.Add(messageLabel);
+        }
+
+        protected override bool ShowWithoutActivation
+        {
+            get { return true; }
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE
+                cp.ExStyle |= 0x00000080; // WS_EX_TOOLWINDOW
+                return cp;
+            }
+        }
+
+        internal void ShowMessage(string title, string message)
+        {
+            titleLabel.Text = title;
+            messageLabel.Text = message;
+
+            Rectangle workArea = Screen.FromPoint(Cursor.Position).WorkingArea;
+            Location = new Point(
+                workArea.Right - Width - 24,
+                workArea.Bottom - Height - 24);
+
+            hideTimer.Stop();
+            hideTimer.Start();
+            if (!Visible)
+                Show();
+            else
+                Invalidate();
+        }
+    }
+
     internal sealed class BridgeKeyEventArgs : EventArgs
     {
         internal string Text { get; private set; }
@@ -435,6 +509,7 @@ namespace TypeBridgeApp
         private readonly HotkeyForm hotkeyForm = new HotkeyForm();
         private readonly GlobalKeyboardHook hook = new GlobalKeyboardHook();
         private readonly NotifyIcon tray = new NotifyIcon();
+        private readonly ToastForm toast = new ToastForm();
         private readonly ContextMenuStrip trayMenu = new ContextMenuStrip();
         private readonly ToolStripMenuItem toggleItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem settingsItem = new ToolStripMenuItem();
@@ -613,10 +688,7 @@ namespace TypeBridgeApp
 
         private void ShowTrayTip(string title, string text)
         {
-            tray.BalloonTipTitle = title;
-            tray.BalloonTipText = text;
-            tray.BalloonTipIcon = ToolTipIcon.Info;
-            tray.ShowBalloonTip(1200);
+            toast.ShowMessage(title, text);
         }
 
         private void HookKey(object sender, BridgeKeyEventArgs e)
@@ -704,6 +776,7 @@ namespace TypeBridgeApp
                 disposed = true;
                 connectionTimer.Stop();
                 hook.Dispose();
+                toast.Dispose();
                 tray.Visible = false;
                 tray.Dispose();
                 hotkeyForm.Dispose();

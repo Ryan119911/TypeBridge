@@ -10,7 +10,7 @@ Add-Type -AssemblyName System.Drawing
 $mutex = New-Object System.Threading.Mutex($false, "Local\TypeBridge-SingleInstance-7C4A")
 if (-not $mutex.WaitOne(0)) { exit }
 
-Add-Type -ReferencedAssemblies System.Windows.Forms -TypeDefinition @"
+Add-Type -ReferencedAssemblies "System.Windows.Forms","System.Drawing" -TypeDefinition @"
 using System;
 using System.Text;
 using System.Windows.Forms;
@@ -41,6 +41,66 @@ public class HotkeyForm : Form {
             return;
         }
         base.WndProc(ref m);
+    }
+}
+
+public sealed class ToastForm : Form {
+    private Label titleLabel = new Label();
+    private Label messageLabel = new Label();
+    private Timer hideTimer = new Timer();
+
+    public ToastForm() {
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        TopMost = true;
+        StartPosition = FormStartPosition.Manual;
+        ClientSize = new Size(380, 84);
+        BackColor = Color.FromArgb(30, 30, 30);
+        Opacity = 0.96;
+
+        titleLabel.AutoSize = false;
+        titleLabel.SetBounds(16, 10, 348, 20);
+        titleLabel.ForeColor = Color.Silver;
+        titleLabel.Font = new Font("Microsoft YaHei", 9F);
+        titleLabel.Text = "TypeBridge";
+
+        messageLabel.AutoSize = false;
+        messageLabel.SetBounds(16, 32, 348, 38);
+        messageLabel.ForeColor = Color.White;
+        messageLabel.Font = new Font("Microsoft YaHei", 11F, FontStyle.Bold);
+        messageLabel.AutoEllipsis = true;
+
+        hideTimer.Interval = 1400;
+        hideTimer.Tick += delegate {
+            hideTimer.Stop();
+            Hide();
+        };
+
+        Controls.Add(titleLabel);
+        Controls.Add(messageLabel);
+    }
+
+    protected override bool ShowWithoutActivation {
+        get { return true; }
+    }
+
+    protected override CreateParams CreateParams {
+        get {
+            CreateParams cp = base.CreateParams;
+            cp.ExStyle |= 0x08000000;
+            cp.ExStyle |= 0x00000080;
+            return cp;
+        }
+    }
+
+    public void ShowMessage(string title, string message) {
+        titleLabel.Text = title;
+        messageLabel.Text = message;
+        Rectangle workArea = Screen.FromPoint(Cursor.Position).WorkingArea;
+        Location = new Point(workArea.Right - Width - 24, workArea.Bottom - Height - 24);
+        hideTimer.Stop();
+        hideTimer.Start();
+        if (!Visible) { Show(); } else { Invalidate(); }
     }
 }
 
@@ -266,6 +326,8 @@ $form.ShowInTaskbar = $false
 $form.Visible = $false
 [void]$form.Handle
 
+$toast = New-Object ToastForm
+
 $hook = New-Object GlobalKeyboardHook
 $hook.Install()
 $hook.Enabled = $false
@@ -301,10 +363,7 @@ function Update-Status {
 }
 
 function Show-TrayTip([string]$title, [string]$text) {
-    $tray.BalloonTipTitle = $title
-    $tray.BalloonTipText = $text
-    $tray.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
-    $tray.ShowBalloonTip(1200)
+    $toast.ShowMessage($title, $text)
 }
 
 function Set-InputMode([bool]$remote, [bool]$notify = $true) {
@@ -492,6 +551,7 @@ try {
 } finally {
     $timerConn.Stop()
     $hook.Dispose()
+    $toast.Dispose()
     $tray.Visible = $false
     $tray.Dispose()
     $form.Dispose()
