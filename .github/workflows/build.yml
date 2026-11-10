@@ -1,0 +1,47 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compile TypeBridge.exe
+        shell: pwsh
+        run: |
+          $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          if (-not (Test-Path $csc)) {
+            throw "Windows .NET Framework C# compiler not found: $csc"
+          }
+          & $csc /nologo /target:winexe /platform:anycpu /optimize+ /codepage:65001 `
+            /out:"TypeBridge.exe" `
+            /reference:System.dll `
+            /reference:System.Drawing.dll `
+            /reference:System.Windows.Forms.dll `
+            /reference:System.Web.Extensions.dll `
+            "TypeBridge.cs"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-Item "TypeBridge.exe" | Select-Object FullName, Length
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TypeBridge-windows
+          path: TypeBridge.exe
+          if-no-files-found: error
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: TypeBridge.exe

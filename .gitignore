@@ -1,0 +1,12 @@
+# 本机配置，包含个人网络地址，不提交
+typebridge.ini
+
+# 本地构建产物
+*.exe
+build/
+obj/
+bin/
+
+# Python 缓存
+__pycache__/
+*.pyc
