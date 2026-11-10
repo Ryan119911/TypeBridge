@@ -8,6 +8,9 @@ TypeBridge Ubuntu 端守护进程（单线程 GLib 事件循环版）
   T <json字符串>   注入文本（json 编码，可含 \n，会转成回车键）
   K <键名>          注入按键: BackSpace Return Tab Escape Delete Home End
                     Up Down Left Right Prior Next 及 ctrl/alt/shift/super 组合
+  M <dx> <dy>       相对移动指针（像素，可为负）
+  B <按钮> down|up  按下/松开鼠标按钮（1 左 2 中 3 右 8 后退 9 前进）
+  W up|down|left|right  滚轮
   PING              应答 PONG
   QUIT              断开
 
@@ -268,6 +271,58 @@ def inject_key(key):
         xdo("key", "--clearmodifiers", key)
 
 
+MOUSE_BUTTONS = {1, 2, 3, 4, 5, 6, 7, 8, 9}
+WHEEL_BUTTONS = {"up": 4, "down": 5, "left": 6, "right": 7}
+MOUSE_MAX_STEP = 2000
+
+
+def mouse_move(payload):
+    """M <dx> <dy>：相对移动指针。"""
+    parts = payload.split()
+    if len(parts) != 2:
+        log("bad M payload: %r" % (payload,))
+        return
+    try:
+        dx = int(parts[0])
+        dy = int(parts[1])
+    except ValueError:
+        log("bad M payload: %r" % (payload,))
+        return
+    dx = max(-MOUSE_MAX_STEP, min(MOUSE_MAX_STEP, dx))
+    dy = max(-MOUSE_MAX_STEP, min(MOUSE_MAX_STEP, dy))
+    if dx == 0 and dy == 0:
+        return
+    xdo("mousemove_relative", "--", str(dx), str(dy))
+
+
+def mouse_button(payload):
+    """B <按钮> down|up：按下/松开按钮，拖拽靠 down 与 up 的配对实现。"""
+    parts = payload.split()
+    if len(parts) != 2 or parts[1] not in ("down", "up"):
+        log("bad B payload: %r" % (payload,))
+        return
+    try:
+        button = int(parts[0])
+    except ValueError:
+        log("bad B payload: %r" % (payload,))
+        return
+    if button not in MOUSE_BUTTONS:
+        log("unsupported mouse button: %r" % (payload,))
+        return
+    log("mouse button %d %s" % (button, parts[1]))
+    xdo("mousedown" if parts[1] == "down" else "mouseup", str(button))
+
+
+def mouse_wheel(payload):
+    """W up|down|left|right：滚轮。"""
+    button = WHEEL_BUTTONS.get(payload.strip())
+    if button is None:
+        log("bad W payload: %r" % (payload,))
+        return
+    log("mouse wheel %s" % payload.strip())
+    xdo("click", str(button))
+
+
 def handle_line(line, sock):
     """返回 False 表示对端请求断开(QUIT)"""
     if line == "PING":
@@ -294,6 +349,12 @@ def handle_line(line, sock):
             inject_key(key)
         else:
             log("unsupported K payload: %r" % payload)
+    elif cmd == "M":
+        mouse_move(payload)
+    elif cmd == "B":
+        mouse_button(payload)
+    elif cmd == "W":
+        mouse_wheel(payload)
     return True
 
 

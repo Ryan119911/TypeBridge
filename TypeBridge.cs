@@ -10,14 +10,17 @@ using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
 [assembly: AssemblyTitle("TypeBridge")]
-[assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard bridge")]
+[assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.2.1.0")]
+[assembly: AssemblyVersion("3.3.0.0")]
 
 namespace TypeBridgeApp
 {
     internal static class Program
     {
+        [DllImport("user32.dll")]
+        private static extern bool SetProcessDPIAware();
+
         [STAThread]
         private static void Main()
         {
@@ -40,6 +43,8 @@ namespace TypeBridgeApp
                     if (!created)
                         return;
 
+                    // 鼠标钩子拿到的是物理像素坐标，声明 DPI 感知后才能和光标坐标对齐
+                    try { SetProcessDPIAware(); } catch { }
                     Application.EnableVisualStyles();
                     Application.SetCompatibleTextRenderingDefault(false);
                     using (BridgeApplicationContext context = new BridgeApplicationContext())
@@ -70,6 +75,19 @@ namespace TypeBridgeApp
                 System.IO.File.AppendAllText(
                     path,
                     DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "\r\n" + ex + "\r\n\r\n");
+            }
+            catch { }
+        }
+
+        internal static void LogInfo(string message)
+        {
+            try
+            {
+                string path = System.IO.Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory, "typebridge-error.log");
+                System.IO.File.AppendAllText(
+                    path,
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " INFO " + message + "\r\n");
             }
             catch { }
         }
@@ -576,6 +594,326 @@ namespace TypeBridgeApp
         }
     }
 
+    internal sealed class BridgeMouseMoveEventArgs : EventArgs
+    {
+        internal int Dx { get; private set; }
+        internal int Dy { get; private set; }
+
+        internal BridgeMouseMoveEventArgs(int dx, int dy)
+        {
+            Dx = dx;
+            Dy = dy;
+        }
+    }
+
+    internal sealed class BridgeMouseButtonEventArgs : EventArgs
+    {
+        internal int Button { get; private set; }
+        internal bool Down { get; private set; }
+
+        internal BridgeMouseButtonEventArgs(int button, bool down)
+        {
+            Button = button;
+            Down = down;
+        }
+    }
+
+    internal sealed class BridgeMouseWheelEventArgs : EventArgs
+    {
+        internal string Direction { get; private set; }
+
+        internal BridgeMouseWheelEventArgs(string direction)
+        {
+            Direction = direction;
+        }
+    }
+
+    /// <summary>
+    /// 全局鼠标钩子：Ubuntu 模式下把相对位移/按键/滚轮送到对端，并吞掉本地事件。
+    /// 光标的物理位移靠“每次事件后把光标钉回屏幕中心”换算成相对增量，
+    /// 这样即使系统把指针夹在屏幕边缘也不会丢位移。
+    /// </summary>
+    internal sealed class GlobalMouseHook : IDisposable
+    {
+        private const int WhMouseLl = 14;
+        private const int WmMouseMove = 0x0200;
+        private const int WmLButtonDown = 0x0201;
+        private const int WmLButtonUp = 0x0202;
+        private const int WmRButtonDown = 0x0204;
+        private const int WmRButtonUp = 0x0205;
+        private const int WmMButtonDown = 0x0207;
+        private const int WmMButtonUp = 0x0208;
+        private const int WmMouseWheel = 0x020A;
+        private const int WmXButtonDown = 0x020B;
+        private const int WmXButtonUp = 0x020C;
+        private const int WmMouseHWheel = 0x020E;
+        private const int FlushIntervalMs = 16;
+        private const int MaxStep = 2000;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MouseData
+        {
+            internal int X;
+            internal int Y;
+            internal uint MouseDataRaw;
+            internal uint Flags;
+            internal uint Time;
+            internal UIntPtr ExtraInfo;
+        }
+
+        private delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SetWindowsHookEx(int idHook, HookProc proc, IntPtr hMod, uint threadId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern IntPtr GetModuleHandle(string moduleName);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetCursorPos(int x, int y);
+
+        private readonly HookProc callback;
+        private readonly Timer flushTimer = new Timer();
+        private readonly HashSet<int> pressedButtons = new HashSet<int>();
+        private IntPtr hook = IntPtr.Zero;
+        private int anchorX;
+        private int anchorY;
+        private int pendingDx;
+        private int pendingDy;
+
+        internal bool Enabled { get; set; }
+        internal bool Connected { get; set; }
+
+        internal event EventHandler<BridgeMouseMoveEventArgs> Moved;
+        internal event EventHandler<BridgeMouseButtonEventArgs> Button;
+        internal event EventHandler<BridgeMouseWheelEventArgs> Wheel;
+
+        internal GlobalMouseHook()
+        {
+            callback = MouseCallback;
+            Rectangle bounds = Screen.PrimaryScreen.Bounds;
+            anchorX = bounds.Left + bounds.Width / 2;
+            anchorY = bounds.Top + bounds.Height / 2;
+            flushTimer.Interval = FlushIntervalMs;
+            flushTimer.Tick += delegate { Flush(); };
+        }
+
+        private bool Active
+        {
+            get { return Enabled && Connected && hook != IntPtr.Zero; }
+        }
+
+        internal void Install()
+        {
+            if (hook != IntPtr.Zero)
+                return;
+            hook = SetWindowsHookEx(WhMouseLl, callback, GetModuleHandle(null), 0);
+            if (hook == IntPtr.Zero)
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            flushTimer.Start();
+        }
+
+        /// <summary>接管瞬间把光标钉到屏幕中心，避免锚点贴近屏幕边缘丢位移。</summary>
+        internal void ResetAnchor()
+        {
+            pendingDx = 0;
+            pendingDy = 0;
+            SetCursorPos(anchorX, anchorY);
+        }
+
+        /// <summary>退出接管时把还按着的键全部松开，避免对端卡住。</summary>
+        internal void ReleaseAll()
+        {
+            pendingDx = 0;
+            pendingDy = 0;
+            if (pressedButtons.Count == 0)
+                return;
+            int[] buttons = new int[pressedButtons.Count];
+            pressedButtons.CopyTo(buttons);
+            pressedButtons.Clear();
+            foreach (int button in buttons)
+                RaiseButton(button, false);
+        }
+
+        private static int Clamp(int value)
+        {
+            if (value > MaxStep)
+                return MaxStep;
+            if (value < -MaxStep)
+                return -MaxStep;
+            return value;
+        }
+
+        private IntPtr MouseCallback(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode < 0)
+                return CallNextHookEx(hook, nCode, wParam, lParam);
+
+            try
+            {
+                if (!Active)
+                {
+                    pendingDx = 0;
+                    pendingDy = 0;
+                    pressedButtons.Clear();
+                    return CallNextHookEx(hook, nCode, wParam, lParam);
+                }
+
+                MouseData data = (MouseData)Marshal.PtrToStructure(lParam, typeof(MouseData));
+                int message = wParam.ToInt32();
+
+                switch (message)
+                {
+                    case WmMouseMove:
+                    {
+                        int dx = data.X - anchorX;
+                        int dy = data.Y - anchorY;
+                        if (dx != 0 || dy != 0)
+                        {
+                            pendingDx = Clamp(pendingDx + dx);
+                            pendingDy = Clamp(pendingDy + dy);
+                            // 只在真的动了才钉回锚点，避免 SetCursorPos 自身触发事件形成回环
+                            SetCursorPos(anchorX, anchorY);
+                        }
+                        return (IntPtr)1;
+                    }
+
+                    case WmLButtonDown:
+                        RaiseButton(1, true);
+                        return (IntPtr)1;
+                    case WmLButtonUp:
+                        RaiseButton(1, false);
+                        return (IntPtr)1;
+
+                    case WmRButtonDown:
+                        RaiseButton(3, true);
+                        return (IntPtr)1;
+                    case WmRButtonUp:
+                        RaiseButton(3, false);
+                        return (IntPtr)1;
+
+                    case WmMButtonDown:
+                        RaiseButton(2, true);
+                        return (IntPtr)1;
+                    case WmMButtonUp:
+                        RaiseButton(2, false);
+                        return (IntPtr)1;
+
+                    case WmXButtonDown:
+                    case WmXButtonUp:
+                    {
+                        // XBUTTON1 = 后退 -> X11 按钮 8；XBUTTON2 = 前进 -> 按钮 9
+                        int which = (int)((data.MouseDataRaw >> 16) & 0xFFFF);
+                        RaiseButton(which == 2 ? 9 : 8, message == WmXButtonDown);
+                        return (IntPtr)1;
+                    }
+
+                    case WmMouseWheel:
+                    {
+                        int delta = (short)((data.MouseDataRaw >> 16) & 0xFFFF);
+                        int notches = delta / 120;
+                        if (notches == 0)
+                            notches = delta > 0 ? 1 : -1;
+                        for (int i = 0; i < Math.Abs(notches) && i < 3; i++)
+                            RaiseWheel(notches > 0 ? "up" : "down");
+                        return (IntPtr)1;
+                    }
+
+                    case WmMouseHWheel:
+                    {
+                        int delta = (short)((data.MouseDataRaw >> 16) & 0xFFFF);
+                        int notches = delta / 120;
+                        if (notches == 0)
+                            notches = delta > 0 ? 1 : -1;
+                        for (int i = 0; i < Math.Abs(notches) && i < 3; i++)
+                            RaiseWheel(notches > 0 ? "right" : "left");
+                        return (IntPtr)1;
+                    }
+                }
+            }
+            catch
+            {
+                // 钩子回调里绝不能抛异常，否则系统可能直接卸载钩子
+            }
+
+            return CallNextHookEx(hook, nCode, wParam, lParam);
+        }
+
+        private void Flush()
+        {
+            int dx = pendingDx;
+            int dy = pendingDy;
+            if (dx == 0 && dy == 0)
+                return;
+            pendingDx = 0;
+            pendingDy = 0;
+            if (!Active)
+                return;
+            EventHandler<BridgeMouseMoveEventArgs> handler = Moved;
+            if (handler == null)
+                return;
+            try
+            {
+                handler(this, new BridgeMouseMoveEventArgs(dx, dy));
+            }
+            catch
+            {
+            }
+        }
+
+        private void RaiseButton(int button, bool down)
+        {
+            if (down)
+                pressedButtons.Add(button);
+            else
+                pressedButtons.Remove(button);
+            EventHandler<BridgeMouseButtonEventArgs> handler = Button;
+            if (handler == null)
+                return;
+            try
+            {
+                handler(this, new BridgeMouseButtonEventArgs(button, down));
+            }
+            catch
+            {
+            }
+        }
+
+        private void RaiseWheel(string direction)
+        {
+            EventHandler<BridgeMouseWheelEventArgs> handler = Wheel;
+            if (handler == null)
+                return;
+            try
+            {
+                handler(this, new BridgeMouseWheelEventArgs(direction));
+            }
+            catch
+            {
+            }
+        }
+
+        public void Dispose()
+        {
+            Enabled = false;
+            Connected = false;
+            flushTimer.Stop();
+            flushTimer.Dispose();
+            if (hook != IntPtr.Zero)
+            {
+                UnhookWindowsHookEx(hook);
+                hook = IntPtr.Zero;
+            }
+            GC.SuppressFinalize(this);
+        }
+    }
+
     internal sealed class SettingsForm : Form
     {
         private readonly TextBox hostBox = new TextBox();
@@ -677,6 +1015,7 @@ namespace TypeBridgeApp
     {
         private readonly HotkeyForm hotkeyForm = new HotkeyForm();
         private readonly GlobalKeyboardHook hook = new GlobalKeyboardHook();
+        private readonly GlobalMouseHook mouseHook = new GlobalMouseHook();
         private readonly NotifyIcon tray = new NotifyIcon();
         private readonly ToastForm toast = new ToastForm();
         private readonly Icon appIcon;        private readonly ContextMenuStrip trayMenu = new ContextMenuStrip();
@@ -711,6 +1050,12 @@ namespace TypeBridgeApp
             hook.Install();
             hook.Enabled = false;
 
+            mouseHook.Moved += HookMouseMove;
+            mouseHook.Button += HookMouseButton;
+            mouseHook.Wheel += HookMouseWheel;
+            mouseHook.Install();
+            mouseHook.Enabled = false;
+
             toggleItem.Text = "切换到 Ubuntu\tCtrl+Alt+U";
             settingsItem.Text = "设置 Ubuntu 地址...";
             exitItem.Text = "退出 TypeBridge";
@@ -731,13 +1076,14 @@ namespace TypeBridgeApp
             connectionTimer.Start();
 
             SetMode(false, false);
-            ShowTrayTip("TypeBridge 已启动", "Ctrl + Alt + U 切换到 Ubuntu 输入");
+            ShowTrayTip("TypeBridge 已启动", "Ctrl + Alt + U 切换到 Ubuntu（键盘 + 鼠标）");
             if (!hotkeyForm.HotKeyAvailable)
                 ShowTrayTip("快捷键不可用", "Ctrl+Alt+U 已被其他程序占用，请用托盘菜单切换");
             if (!configLoaded)
             {
                 hotkeyForm.BeginInvoke(new Action(delegate { ShowSettings(true); }));
             }
+            Program.LogInfo("started, icon=" + (appIcon == null ? "null" : "ok"));
         }
 
         private static Icon LoadAppIcon()
@@ -858,13 +1204,23 @@ namespace TypeBridgeApp
         {
             ubuntuMode = remote;
             hook.Enabled = remote;
+            if (remote)
+            {
+                mouseHook.ResetAnchor();
+            }
+            else
+            {
+                mouseHook.ReleaseAll();
+            }
+            mouseHook.Enabled = remote;
             UpdateStatus();
             if (notify)
-                ShowTrayTip("TypeBridge", "当前输入：" + (remote ? "Ubuntu（使用 Ubuntu 输入法）" : "Windows"));
+                ShowTrayTip("TypeBridge", "当前输入：" + (remote ? "Ubuntu（键盘 + 鼠标）" : "Windows"));
         }
 
         private void UpdateStatus()
         {
+            mouseHook.Connected = stream != null;
             if (ubuntuMode)
             {
                 tray.Text = stream != null ? "TypeBridge → Ubuntu（已连接）" : "TypeBridge → Ubuntu（未连接）";
@@ -890,6 +1246,27 @@ namespace TypeBridgeApp
                 SendText(e.Text);
             else if (!string.IsNullOrEmpty(e.KeyName))
                 SendLine("K " + e.KeyName);
+        }
+
+        private void HookMouseMove(object sender, BridgeMouseMoveEventArgs e)
+        {
+            if (!ubuntuMode)
+                return;
+            SendLine("M " + e.Dx.ToString() + " " + e.Dy.ToString());
+        }
+
+        private void HookMouseButton(object sender, BridgeMouseButtonEventArgs e)
+        {
+            if (!ubuntuMode)
+                return;
+            SendLine("B " + e.Button.ToString() + (e.Down ? " down" : " up"));
+        }
+
+        private void HookMouseWheel(object sender, BridgeMouseWheelEventArgs e)
+        {
+            if (!ubuntuMode)
+                return;
+            SendLine("W " + e.Direction);
         }
 
         private void ConnectToServer()
@@ -932,6 +1309,8 @@ namespace TypeBridgeApp
             catch { }
             client = null;
             stream = null;
+            mouseHook.Connected = false;
+            mouseHook.ReleaseAll();
         }
 
         private bool SendLine(string line)
@@ -962,10 +1341,13 @@ namespace TypeBridgeApp
 
         protected override void ExitThreadCore()
         {
+            Program.LogInfo("ExitThreadCore");
             if (!disposed)
             {
                 disposed = true;
                 connectionTimer.Stop();
+                mouseHook.ReleaseAll();
+                mouseHook.Dispose();
                 hook.Dispose();
                 toast.Dispose();
                 tray.Visible = false;
