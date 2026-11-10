@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=TypeBridge
+Name[zh_CN]=TypeBridge 输入桥
+Comment=Configure the Windows to Ubuntu keyboard bridge
+Comment[zh_CN]=配置 Windows 到 Ubuntu 的键盘输入桥
+Exec=/usr/bin/typebridge-ui
+Icon=input-keyboard
+Terminal=false
+Categories=Utility;Settings;
+StartupNotify=true

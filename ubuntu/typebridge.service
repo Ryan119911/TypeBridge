@@ -1,0 +1,17 @@
+[Unit]
+Description=TypeBridge - Windows to Ubuntu keyboard bridge
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/lib/typebridge/typebridge-ubuntu.py
+Restart=on-failure
+RestartSec=2
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=%t/gdm/Xauthority
+Environment=GTK_IM_MODULE=fcitx
+Environment=QT_IM_MODULE=fcitx
+Environment=XMODIFIERS=@im=fcitx
+
+[Install]
+WantedBy=graphical-session.target
