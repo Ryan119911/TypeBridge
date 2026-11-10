@@ -275,8 +275,20 @@ namespace TypeBridgeApp
         private readonly HashSet<int> modifierDown = new HashSet<int>();
         private readonly HashSet<int> modifierUsed = new HashSet<int>();
         private IntPtr hook = IntPtr.Zero;
+        private bool enabled;
+        private bool capsLockState;
 
-        internal bool Enabled { get; set; }
+        internal bool Enabled
+        {
+            get { return enabled; }
+            set
+            {
+                enabled = value;
+                if (value)
+                    capsLockState = (GetKeyState(0x14) & 1) != 0;
+            }
+        }
+
         internal event EventHandler<BridgeKeyEventArgs> Key;
         internal event EventHandler ToggleRequested;
 
@@ -444,12 +456,12 @@ namespace TypeBridgeApp
             }
         }
 
-        private static string KeyText(KbdData data)
+        private string KeyText(KbdData data)
         {
             byte[] state = new byte[256];
             if ((GetAsyncKeyState(0x10) & 0x8000) != 0)
                 state[0x10] = 0x80;
-            if ((GetKeyState(0x14) & 1) != 0)
+            if (capsLockState)
                 state[0x14] = 0x01;
             if ((GetKeyState(0x90) & 1) != 0)
                 state[0x90] = 0x01;
@@ -502,6 +514,13 @@ namespace TypeBridgeApp
 
                     if (!Enabled)
                         return CallNextHookEx(hook, nCode, wParam, lParam);
+
+                    if (vk == (int)Keys.CapsLock)
+                    {
+                        capsLockState = !capsLockState;
+                        suppressedKeys.Add(vk);
+                        return (IntPtr)1;
+                    }
 
                     if (IsModifierKey(vk))
                     {

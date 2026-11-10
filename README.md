@@ -211,7 +211,8 @@ port=4321
 | Insert | `K Insert` |
 | F1–F24 | `K F1` … `K F24` |
 | 独立 Ctrl / Shift / Alt / Win | 松开修饰键时补发单键，Ubuntu 能收到独立按键 |
-| CapsLock / NumLock / ScrollLock | 注入锁定键，并保持当前锁定状态 |
+| CapsLock | 客户端维护大写状态，随后字母以大写字形发送，不依赖 Ubuntu 端 CapsLock 状态 |
+| NumLock / ScrollLock | 注入锁定键，并保持对应锁定状态 |
 | PrintScreen / Pause / Menu | 注入对应 X11 按键 |
 | 小键盘 0–9 与运算符 | 注入数字和 `+ - * / .`，不会改变 NumLock 状态 |
 | 音量、播放/暂停、上一曲/下一曲、停止 | 注入对应媒体键 |
