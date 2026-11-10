@@ -78,27 +78,253 @@ namespace TypeBridgeApp
             }
             catch { }
         }
+    }
 
-        internal static void LogInfo(string message)
+    /// <summary>可配置的全局切换快捷键，例如 Ctrl+Alt+U。</summary>
+    internal sealed class Hotkey
+    {
+        private const uint ModAltFlag = 0x0001;
+        private const uint ModControlFlag = 0x0002;
+        private const uint ModShiftFlag = 0x0004;
+        private const uint ModWinFlag = 0x0008;
+        private const uint ModNoRepeat = 0x4000;
+
+        internal bool Ctrl { get; private set; }
+        internal bool Alt { get; private set; }
+        internal bool Shift { get; private set; }
+        internal bool Win { get; private set; }
+        internal Keys Key { get; private set; }
+
+        internal Hotkey(bool ctrl, bool alt, bool shift, bool win, Keys key)
         {
-            try
+            Ctrl = ctrl;
+            Alt = alt;
+            Shift = shift;
+            Win = win;
+            Key = key;
+        }
+
+        internal static Hotkey DefaultKeyboard()
+        {
+            return new Hotkey(true, true, false, false, Keys.U);
+        }
+
+        internal static Hotkey DefaultMouse()
+        {
+            return new Hotkey(true, true, false, false, Keys.M);
+        }
+
+        internal bool HasModifier
+        {
+            get { return Ctrl || Alt || Shift || Win; }
+        }
+
+        internal uint ModifierFlags
+        {
+            get
             {
-                string path = System.IO.Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory, "typebridge-error.log");
-                System.IO.File.AppendAllText(
-                    path,
-                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " INFO " + message + "\r\n");
+                uint flags = ModNoRepeat;
+                if (Ctrl) flags |= ModControlFlag;
+                if (Alt) flags |= ModAltFlag;
+                if (Shift) flags |= ModShiftFlag;
+                if (Win) flags |= ModWinFlag;
+                return flags;
             }
-            catch { }
+        }
+
+        /// <summary>与键盘钩子采集到的修饰键列表和虚拟键码比较。</summary>
+        internal bool Matches(List<string> modifiers, int virtualKey)
+        {
+            if (virtualKey != (int)Key)
+                return false;
+
+            int expected = 0;
+            if (Ctrl) expected++;
+            if (Alt) expected++;
+            if (Shift) expected++;
+            if (Win) expected++;
+            if (modifiers.Count != expected)
+                return false;
+
+            if (Ctrl != modifiers.Contains("ctrl")) return false;
+            if (Alt != modifiers.Contains("alt")) return false;
+            if (Shift != modifiers.Contains("shift")) return false;
+            if (Win != modifiers.Contains("super")) return false;
+            return true;
+        }
+
+        internal static Hotkey Parse(string text, Hotkey fallback)
+        {
+            if (string.IsNullOrEmpty(text))
+                return fallback;
+
+            bool ctrl = false, alt = false, shift = false, win = false;
+            Keys key = Keys.None;
+            string[] parts = text.Split('+');
+            for (int i = 0; i < parts.Length; i++)
+            {
+                string token = parts[i].Trim();
+                if (token.Length == 0)
+                    continue;
+                string lower = token.ToLowerInvariant();
+                if (lower == "ctrl" || lower == "control") { ctrl = true; continue; }
+                if (lower == "alt") { alt = true; continue; }
+                if (lower == "shift") { shift = true; continue; }
+                if (lower == "win" || lower == "super" || lower == "meta") { win = true; continue; }
+                key = ParseKey(token);
+            }
+            if (key == Keys.None)
+                return fallback;
+            return new Hotkey(ctrl, alt, shift, win, key);
+        }
+
+        private static Keys ParseKey(string token)
+        {
+            string upper = token.ToUpperInvariant();
+            if (upper.Length == 1)
+            {
+                char c = upper[0];
+                if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+                    return (Keys)(int)c;
+            }
+            if (upper.Length >= 2 && upper[0] == 'F')
+            {
+                int number;
+                if (int.TryParse(upper.Substring(1), out number) && number >= 1 && number <= 24)
+                    return (Keys)(0x6F + number);
+            }
+            switch (upper)
+            {
+                case "SPACE": return Keys.Space;
+                case "TAB": return Keys.Tab;
+                case "ESC":
+                case "ESCAPE": return Keys.Escape;
+                case "ENTER":
+                case "RETURN": return Keys.Return;
+                case "INSERT": return Keys.Insert;
+                case "DELETE": return Keys.Delete;
+                case "HOME": return Keys.Home;
+                case "END": return Keys.End;
+                case "PAGEUP":
+                case "PRIOR": return Keys.Prior;
+                case "PAGEDOWN":
+                case "NEXT": return Keys.Next;
+                case "UP": return Keys.Up;
+                case "DOWN": return Keys.Down;
+                case "LEFT": return Keys.Left;
+                case "RIGHT": return Keys.Right;
+                default: return Keys.None;
+            }
+        }
+
+        private static string KeyName(Keys key)
+        {
+            int code = (int)key;
+            if (code >= (int)Keys.A && code <= (int)Keys.Z)
+                return ((char)code).ToString();
+            if (code >= (int)Keys.D0 && code <= (int)Keys.D9)
+                return ((char)code).ToString();
+            if (code >= 0x70 && code <= 0x87)
+                return "F" + (code - 0x6F).ToString();
+            switch (key)
+            {
+                case Keys.Space: return "Space";
+                case Keys.Tab: return "Tab";
+                case Keys.Escape: return "Esc";
+                case Keys.Return: return "Enter";
+                case Keys.Insert: return "Insert";
+                case Keys.Delete: return "Delete";
+                case Keys.Home: return "Home";
+                case Keys.End: return "End";
+                case Keys.Prior: return "PageUp";
+                case Keys.Next: return "PageDown";
+                case Keys.Up: return "Up";
+                case Keys.Down: return "Down";
+                case Keys.Left: return "Left";
+                case Keys.Right: return "Right";
+                default: return key.ToString();
+            }
+        }
+
+        public override string ToString()
+        {
+            StringBuilder text = new StringBuilder();
+            if (Ctrl) text.Append("Ctrl+");
+            if (Alt) text.Append("Alt+");
+            if (Shift) text.Append("Shift+");
+            if (Win) text.Append("Win+");
+            text.Append(KeyName(Key));
+            return text.ToString();
+        }
+    }
+
+    /// <summary>点击后按下组合键即可录制的快捷键输入框。</summary>
+    internal sealed class HotkeyBox : TextBox
+    {
+        private Hotkey value;
+
+        internal Hotkey Value
+        {
+            get { return value; }
+            set
+            {
+                this.value = value;
+                Text = value == null ? string.Empty : value.ToString();
+            }
+        }
+
+        internal HotkeyBox()
+        {
+            ReadOnly = true;
+            ShortcutsEnabled = false;
+            TextAlign = HorizontalAlignment.Center;
+            BackColor = SystemColors.Window;
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            Keys key = keyData & Keys.KeyCode;
+            if (key == Keys.None)
+                return base.ProcessCmdKey(ref msg, keyData);
+
+            if (key == Keys.Back || key == Keys.Delete)
+            {
+                value = null;
+                Text = string.Empty;
+                return true;
+            }
+
+            if (key == Keys.ControlKey || key == Keys.LControlKey || key == Keys.RControlKey ||
+                key == Keys.ShiftKey || key == Keys.LShiftKey || key == Keys.RShiftKey ||
+                key == Keys.Menu || key == Keys.LMenu || key == Keys.RMenu ||
+                key == Keys.LWin || key == Keys.RWin)
+            {
+                return true;
+            }
+
+            bool ctrl = (keyData & Keys.Control) == Keys.Control;
+            bool alt = (keyData & Keys.Alt) == Keys.Alt;
+            bool shift = (keyData & Keys.Shift) == Keys.Shift;
+            // Win 组合键会先被系统截获，无法可靠录制；配置文件里仍可手写 Win+...
+            bool win = false;
+
+            if (!ctrl && !alt && !shift &&
+                (key == Keys.Tab || key == Keys.Return || key == Keys.Escape))
+            {
+                return base.ProcessCmdKey(ref msg, keyData);
+            }
+
+            value = new Hotkey(ctrl, alt, shift, win, key);
+            Text = value.ToString();
+            return true;
         }
     }
 
     internal sealed class HotkeyForm : Form
     {
         private const int WmHotKey = 0x0312;
-        private const int HotKeyId = 0x5472;
-        private const uint ModAlt = 0x0001;
-        private const uint ModControl = 0x0002;
+        private const int KeyboardHotKeyId = 0x5472;
+        private const int MouseHotKeyId = 0x5473;
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint modifiers, uint key);
@@ -106,33 +332,88 @@ namespace TypeBridgeApp
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
-        internal bool HotKeyAvailable { get; private set; }
-        internal event EventHandler HotKeyPressed;
+        private Hotkey keyboardHotkey = Hotkey.DefaultKeyboard();
+        private Hotkey mouseHotkey = Hotkey.DefaultMouse();
+        private bool separateMouseHotkey;
+        private bool configured;
+
+        internal bool KeyboardHotKeyAvailable { get; private set; }
+        internal bool MouseHotKeyAvailable { get; private set; }
+        internal event EventHandler KeyboardHotKeyPressed;
+        internal event EventHandler MouseHotKeyPressed;
+
+        internal void Configure(Hotkey keyboard, Hotkey mouse, bool separateMouse)
+        {
+            keyboardHotkey = keyboard;
+            mouseHotkey = mouse;
+            separateMouseHotkey = separateMouse;
+            configured = true;
+            if (IsHandleCreated)
+                RegisterAll();
+        }
 
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
-            HotKeyAvailable = RegisterHotKey(Handle, HotKeyId, ModControl | ModAlt, (uint)Keys.U);
+            if (configured)
+                RegisterAll();
         }
 
         protected override void OnHandleDestroyed(EventArgs e)
         {
-            if (HotKeyAvailable)
-            {
-                UnregisterHotKey(Handle, HotKeyId);
-                HotKeyAvailable = false;
-            }
+            UnregisterAll();
             base.OnHandleDestroyed(e);
+        }
+
+        private void UnregisterAll()
+        {
+            if (KeyboardHotKeyAvailable)
+            {
+                UnregisterHotKey(Handle, KeyboardHotKeyId);
+                KeyboardHotKeyAvailable = false;
+            }
+            if (MouseHotKeyAvailable)
+            {
+                UnregisterHotKey(Handle, MouseHotKeyId);
+                MouseHotKeyAvailable = false;
+            }
+        }
+
+        /// <summary>打开设置窗口时释放全局热键，否则录音快捷键会被自己占用。</summary>
+        internal void SuspendHotkeys()
+        {
+            UnregisterAll();
+        }
+
+        private void RegisterAll()
+        {
+            UnregisterAll();
+            KeyboardHotKeyAvailable = RegisterHotKey(
+                Handle, KeyboardHotKeyId, keyboardHotkey.ModifierFlags, (uint)keyboardHotkey.Key);
+            if (separateMouseHotkey)
+                MouseHotKeyAvailable = RegisterHotKey(
+                    Handle, MouseHotKeyId, mouseHotkey.ModifierFlags, (uint)mouseHotkey.Key);
         }
 
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == WmHotKey && m.WParam.ToInt32() == HotKeyId)
+            if (m.Msg == WmHotKey)
             {
-                EventHandler handler = HotKeyPressed;
-                if (handler != null)
-                    handler(this, EventArgs.Empty);
-                return;
+                int id = m.WParam.ToInt32();
+                if (id == KeyboardHotKeyId)
+                {
+                    EventHandler handler = KeyboardHotKeyPressed;
+                    if (handler != null)
+                        handler(this, EventArgs.Empty);
+                    return;
+                }
+                if (id == MouseHotKeyId)
+                {
+                    EventHandler handler = MouseHotKeyPressed;
+                    if (handler != null)
+                        handler(this, EventArgs.Empty);
+                    return;
+                }
             }
             base.WndProc(ref m);
         }
@@ -297,9 +578,13 @@ namespace TypeBridgeApp
         internal event EventHandler<BridgeKeyEventArgs> Key;
         internal event EventHandler ToggleRequested;
 
+        /// <summary>Ubuntu 模式下用于切回 Windows 的组合键，与托盘注册的热键保持一致。</summary>
+        internal Hotkey ToggleHotkey { get; set; }
+
         internal GlobalKeyboardHook()
         {
             callback = HookCallback;
+            ToggleHotkey = Hotkey.DefaultKeyboard();
         }
 
         internal void Install()
@@ -366,14 +651,6 @@ namespace TypeBridgeApp
             {
                 return false;
             }
-        }
-
-        private static bool IsToggleHotKey(int virtualKey, List<string> modifiers)
-        {
-            return virtualKey == (int)Keys.U &&
-                modifiers.Count == 2 &&
-                modifiers.Contains("ctrl") &&
-                modifiers.Contains("alt");
         }
 
         private static string SpecialKeyName(int virtualKey)
@@ -535,7 +812,7 @@ namespace TypeBridgeApp
                     }
 
                     List<string> modifiers = ActiveModifiers();
-                    if (IsToggleHotKey(vk, modifiers))
+                    if (ToggleHotkey != null && ToggleHotkey.Matches(modifiers, vk))
                     {
                         MarkModifiersUsed();
                         suppressedKeys.Add(vk);
@@ -678,6 +955,9 @@ namespace TypeBridgeApp
         [DllImport("user32.dll")]
         private static extern bool SetCursorPos(int x, int y);
 
+        [DllImport("user32.dll")]
+        private static extern bool GetCursorPos(out Point point);
+
         private readonly HookProc callback;
         private readonly Timer flushTimer = new Timer();
         private readonly HashSet<int> pressedButtons = new HashSet<int>();
@@ -686,6 +966,10 @@ namespace TypeBridgeApp
         private int anchorY;
         private int pendingDx;
         private int pendingDy;
+        private int restoreX;
+        private int restoreY;
+        private bool hasRestore;
+        private bool pinned;
 
         internal bool Enabled { get; set; }
         internal bool Connected { get; set; }
@@ -724,7 +1008,33 @@ namespace TypeBridgeApp
         {
             pendingDx = 0;
             pendingDy = 0;
+            if (!pinned)
+            {
+                Point current;
+                if (GetCursorPos(out current))
+                {
+                    restoreX = current.X;
+                    restoreY = current.Y;
+                    hasRestore = true;
+                }
+            }
             SetCursorPos(anchorX, anchorY);
+            pinned = true;
+        }
+
+        /// <summary>退出接管后把光标放回接管前的位置。</summary>
+        internal void RestoreCursor()
+        {
+            if (!pinned)
+                return;
+            pinned = false;
+            pendingDx = 0;
+            pendingDy = 0;
+            if (hasRestore)
+            {
+                SetCursorPos(restoreX, restoreY);
+                hasRestore = false;
+            }
         }
 
         /// <summary>退出接管时把还按着的键全部松开，避免对端卡住。</summary>
@@ -903,6 +1213,7 @@ namespace TypeBridgeApp
         {
             Enabled = false;
             Connected = false;
+            RestoreCursor();
             flushTimer.Stop();
             flushTimer.Dispose();
             if (hook != IntPtr.Zero)
@@ -918,15 +1229,26 @@ namespace TypeBridgeApp
     {
         private readonly TextBox hostBox = new TextBox();
         private readonly TextBox portBox = new TextBox();
+        private readonly HotkeyBox keyboardBox = new HotkeyBox();
+        private readonly HotkeyBox mouseBox = new HotkeyBox();
+        private readonly CheckBox linkBox = new CheckBox();
+        private readonly Label mouseLabel = new Label();
         private readonly Label errorLabel = new Label();
 
         internal string Host { get; private set; }
         internal int Port { get; private set; }
+        internal Hotkey KeyboardHotkey { get; private set; }
+        internal Hotkey MouseHotkey { get; private set; }
+        internal bool LinkMouse { get; private set; }
 
-        internal SettingsForm(string host, int port, bool firstRun)
+        internal SettingsForm(string host, int port, Hotkey keyboardHotkey, Hotkey mouseHotkey,
+            bool linkMouse, bool firstRun)
         {
             Host = host;
             Port = port;
+            KeyboardHotkey = keyboardHotkey;
+            MouseHotkey = mouseHotkey;
+            LinkMouse = linkMouse;
 
             try { Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath); }
             catch { }
@@ -938,45 +1260,90 @@ namespace TypeBridgeApp
             MinimizeBox = false;
             ShowInTaskbar = false;
             TopMost = true;
-            ClientSize = new Size(420, 220);
+            ClientSize = new Size(460, 410);
 
             Label hostLabel = new Label();
             hostLabel.Text = "Ubuntu 地址（Tailscale IP、局域网 IP 或主机名）";
             hostLabel.AutoSize = true;
-            hostLabel.Location = new Point(16, 16);
+            hostLabel.Location = new Point(16, 14);
 
             hostBox.Text = host;
-            hostBox.SetBounds(16, 42, 388, 26);
+            hostBox.SetBounds(16, 40, 428, 26);
             hostBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
             Label portLabel = new Label();
             portLabel.Text = "端口";
             portLabel.AutoSize = true;
-            portLabel.Location = new Point(16, 80);
+            portLabel.Location = new Point(16, 78);
 
             portBox.Text = port.ToString();
-            portBox.SetBounds(16, 104, 100, 26);
+            portBox.SetBounds(16, 102, 90, 26);
 
             Label hint = new Label();
             hint.Text = "默认 4321；请填写你自己的 Ubuntu 地址。";
             hint.AutoSize = true;
             hint.ForeColor = Color.Gray;
-            hint.Location = new Point(130, 108);
+            hint.Location = new Point(120, 106);
+
+            GroupBox hotkeyGroup = new GroupBox();
+            hotkeyGroup.Text = "切换快捷键";
+            hotkeyGroup.SetBounds(16, 140, 428, 158);
+
+            linkBox.Text = "键盘和鼠标一起切换（推荐）";
+            linkBox.Checked = linkMouse;
+            linkBox.SetBounds(14, 18, 390, 24);
+            linkBox.CheckedChanged += delegate
+            {
+                mouseBox.Enabled = !linkBox.Checked;
+                mouseLabel.Enabled = !linkBox.Checked;
+            };
+
+            Label keyboardLabel = new Label();
+            keyboardLabel.Text = "键盘快捷键";
+            keyboardLabel.AutoSize = true;
+            keyboardLabel.Location = new Point(14, 50);
+
+            keyboardBox.SetBounds(104, 46, 190, 26);
+            keyboardBox.Value = keyboardHotkey;
+
+            mouseLabel.Text = "鼠标快捷键";
+            mouseLabel.AutoSize = true;
+            mouseLabel.Location = new Point(14, 84);
+
+            mouseBox.SetBounds(104, 80, 190, 26);
+            mouseBox.Value = mouseHotkey;
+            mouseBox.Enabled = !linkMouse;
+            mouseLabel.Enabled = !linkMouse;
+
+            Label hint2 = new Label();
+            hint2.Text = "点击输入框后按下组合键，至少包含 Ctrl、Alt 或 Shift；取消联动后鼠标快捷键才生效。";
+            hint2.AutoSize = false;
+            hint2.SetBounds(14, 114, 400, 38);
+            hint2.ForeColor = Color.Gray;
+
+            hotkeyGroup.Controls.Add(linkBox);
+            hotkeyGroup.Controls.Add(keyboardLabel);
+            hotkeyGroup.Controls.Add(keyboardBox);
+            hotkeyGroup.Controls.Add(mouseLabel);
+            hotkeyGroup.Controls.Add(mouseBox);
+            hotkeyGroup.Controls.Add(hint2);
 
             errorLabel.AutoSize = false;
-            errorLabel.SetBounds(16, 138, 388, 34);
+            errorLabel.SetBounds(16, 306, 428, 40);
             errorLabel.ForeColor = Color.Firebrick;
 
             Button cancelButton = new Button();
             cancelButton.Text = "取消";
             cancelButton.DialogResult = DialogResult.Cancel;
-            cancelButton.SetBounds(230, 180, 80, 30);
+            cancelButton.SetBounds(252, 358, 84, 30);
 
             Button saveButton = new Button();
             saveButton.Text = "保存";
-            saveButton.SetBounds(320, 180, 84, 30);
+            saveButton.SetBounds(344, 358, 100, 30);
             saveButton.Click += delegate
             {
+                errorLabel.Text = string.Empty;
+
                 string newHost = hostBox.Text.Trim();
                 if (newHost.Length == 0)
                 {
@@ -991,8 +1358,32 @@ namespace TypeBridgeApp
                     return;
                 }
 
+                Hotkey newKeyboard = keyboardBox.Value;
+                if (newKeyboard == null || !newKeyboard.HasModifier)
+                {
+                    errorLabel.Text = "键盘快捷键需要至少一个修饰键（Ctrl / Alt / Shift）。";
+                    return;
+                }
+
+                Hotkey newMouse = mouseBox.Value;
+                if (newMouse == null)
+                    newMouse = Hotkey.DefaultMouse();
+                if (!newMouse.HasModifier)
+                {
+                    errorLabel.Text = "鼠标快捷键需要至少一个修饰键（Ctrl / Alt / Shift）。";
+                    return;
+                }
+                if (!linkBox.Checked && newMouse.ToString() == newKeyboard.ToString())
+                {
+                    errorLabel.Text = "键盘和鼠标的快捷键不能相同。";
+                    return;
+                }
+
                 Host = newHost;
                 Port = newPort;
+                KeyboardHotkey = newKeyboard;
+                MouseHotkey = newMouse;
+                LinkMouse = linkBox.Checked;
                 DialogResult = DialogResult.OK;
                 Close();
             };
@@ -1005,6 +1396,7 @@ namespace TypeBridgeApp
             Controls.Add(portLabel);
             Controls.Add(portBox);
             Controls.Add(hint);
+            Controls.Add(hotkeyGroup);
             Controls.Add(errorLabel);
             Controls.Add(cancelButton);
             Controls.Add(saveButton);
@@ -1018,8 +1410,10 @@ namespace TypeBridgeApp
         private readonly GlobalMouseHook mouseHook = new GlobalMouseHook();
         private readonly NotifyIcon tray = new NotifyIcon();
         private readonly ToastForm toast = new ToastForm();
-        private readonly Icon appIcon;        private readonly ContextMenuStrip trayMenu = new ContextMenuStrip();
+        private readonly Icon appIcon;
+        private readonly ContextMenuStrip trayMenu = new ContextMenuStrip();
         private readonly ToolStripMenuItem toggleItem = new ToolStripMenuItem();
+        private readonly ToolStripMenuItem mouseToggleItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem settingsItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem exitItem = new ToolStripMenuItem();
         private readonly Timer connectionTimer = new Timer();
@@ -1029,7 +1423,11 @@ namespace TypeBridgeApp
         private NetworkStream stream;
         private string ip = "127.0.0.1";
         private int port = 4321;
-        private bool ubuntuMode;
+        private Hotkey keyboardHotkey = Hotkey.DefaultKeyboard();
+        private Hotkey mouseHotkey = Hotkey.DefaultMouse();
+        private bool linkMouse = true;
+        private bool keyboardMode;
+        private bool mouseMode;
         private bool configLoaded;
         private bool settingsOpen;
         private bool disposed;
@@ -1043,10 +1441,11 @@ namespace TypeBridgeApp
             hotkeyForm.Visible = false;
             IntPtr unusedHandle = hotkeyForm.Handle;
             GC.KeepAlive(unusedHandle);
-            hotkeyForm.HotKeyPressed += delegate { ToggleMode(); };
+            hotkeyForm.KeyboardHotKeyPressed += delegate { ToggleKeyboardMode(); };
+            hotkeyForm.MouseHotKeyPressed += delegate { ToggleMouseMode(); };
 
             hook.Key += HookKey;
-            hook.ToggleRequested += delegate { ToggleMode(); };
+            hook.ToggleRequested += delegate { ToggleKeyboardMode(); };
             hook.Install();
             hook.Enabled = false;
 
@@ -1056,34 +1455,54 @@ namespace TypeBridgeApp
             mouseHook.Install();
             mouseHook.Enabled = false;
 
-            toggleItem.Text = "切换到 Ubuntu\tCtrl+Alt+U";
-            settingsItem.Text = "设置 Ubuntu 地址...";
+            toggleItem.Click += delegate { ToggleKeyboardMode(); };
+            mouseToggleItem.Click += delegate { ToggleMouseMode(); };
+            settingsItem.Text = "设置...";
+            settingsItem.Click += delegate { ShowSettings(false); };
             exitItem.Text = "退出 TypeBridge";
             exitItem.Click += delegate { ExitThread(); };
-            toggleItem.Click += delegate { ToggleMode(); };
-            settingsItem.Click += delegate { ShowSettings(false); };
             trayMenu.Items.Add(toggleItem);
+            trayMenu.Items.Add(mouseToggleItem);
+            trayMenu.Items.Add(new ToolStripSeparator());
             trayMenu.Items.Add(settingsItem);
             trayMenu.Items.Add(exitItem);
 
             tray.ContextMenuStrip = trayMenu;
             tray.Icon = appIcon;
-            tray.DoubleClick += delegate { ToggleMode(); };
+            tray.DoubleClick += delegate { ToggleKeyboardMode(); };
             tray.Visible = true;
 
             connectionTimer.Interval = 1000;
             connectionTimer.Tick += delegate { ConnectToServer(); };
             connectionTimer.Start();
 
-            SetMode(false, false);
-            ShowTrayTip("TypeBridge 已启动", "Ctrl + Alt + U 切换到 Ubuntu（键盘 + 鼠标）");
-            if (!hotkeyForm.HotKeyAvailable)
-                ShowTrayTip("快捷键不可用", "Ctrl+Alt+U 已被其他程序占用，请用托盘菜单切换");
+            ApplyHotkeys();
+            SetKeyboardMode(false, false);
+            SetMouseMode(false, false);
+            ShowHotkeyTip();
             if (!configLoaded)
             {
                 hotkeyForm.BeginInvoke(new Action(delegate { ShowSettings(true); }));
             }
-            Program.LogInfo("started, icon=" + (appIcon == null ? "null" : "ok"));
+        }
+
+        private void ShowHotkeyTip()
+        {
+            string text = linkMouse
+                ? keyboardHotkey + " 切换键盘 + 鼠标到 Ubuntu"
+                : "键盘 " + keyboardHotkey + "，鼠标 " + mouseHotkey;
+            ShowTrayTip("TypeBridge 已启动", text);
+
+            if (!hotkeyForm.KeyboardHotKeyAvailable)
+                ShowTrayTip("快捷键不可用", keyboardHotkey + " 已被其他程序占用，请改设置");
+            else if (!linkMouse && !hotkeyForm.MouseHotKeyAvailable)
+                ShowTrayTip("鼠标快捷键不可用", mouseHotkey + " 已被其他程序占用，请改设置");
+        }
+
+        private void ApplyHotkeys()
+        {
+            hook.ToggleHotkey = keyboardHotkey;
+            hotkeyForm.Configure(keyboardHotkey, mouseHotkey, !linkMouse);
         }
 
         private static Icon LoadAppIcon()
@@ -1135,12 +1554,28 @@ namespace TypeBridgeApp
                         if (int.TryParse(value, out configuredPort) && configuredPort > 0 && configuredPort <= 65535)
                             port = configuredPort;
                     }
+                    if (key == "keyboard_hotkey")
+                        keyboardHotkey = Hotkey.Parse(value, keyboardHotkey);
+                    if (key == "mouse_hotkey")
+                        mouseHotkey = Hotkey.Parse(value, mouseHotkey);
+                    if (key == "mouse_with_keyboard")
+                        linkMouse = ParseBool(value, linkMouse);
                 }
             }
             catch
             {
-                // 配置不可读时继续使用默认 Tailscale 地址。
+                // 配置不可读时继续使用默认值。
             }
+        }
+
+        private static bool ParseBool(string value, bool fallback)
+        {
+            string lower = value.Trim().ToLowerInvariant();
+            if (lower == "1" || lower == "true" || lower == "yes" || lower == "on")
+                return true;
+            if (lower == "0" || lower == "false" || lower == "no" || lower == "off")
+                return false;
+            return fallback;
         }
 
         private void ShowSettings(bool firstRun)
@@ -1148,27 +1583,50 @@ namespace TypeBridgeApp
             if (settingsOpen)
                 return;
             settingsOpen = true;
+
+            bool resumeKeyboard = keyboardMode;
+            bool resumeMouse = mouseMode;
+
+            // 设置窗口要用本机键盘操作，先释放钩子和全局热键，否则按键会被发去 Ubuntu、
+            // 正在使用的组合键也无法录制。
+            hook.Enabled = false;
+            mouseHook.ReleaseAll();
+            mouseHook.Enabled = false;
+            mouseHook.RestoreCursor();
+            mouseMode = false;
+            hotkeyForm.SuspendHotkeys();
+            UpdateStatus();
+
             try
             {
-                using (SettingsForm form = new SettingsForm(ip, port, firstRun))
+                using (SettingsForm form = new SettingsForm(
+                    ip, port, keyboardHotkey, mouseHotkey, linkMouse, firstRun))
                 {
                     if (form.ShowDialog() != DialogResult.OK)
                         return;
 
                     ip = form.Host;
                     port = form.Port;
+                    keyboardHotkey = form.KeyboardHotkey;
+                    mouseHotkey = form.MouseHotkey;
+                    linkMouse = form.LinkMouse;
+
                     if (!SaveConfiguration())
                         return;
 
                     configLoaded = true;
                     CloseConnection();
-                    UpdateStatus();
                     ShowTrayTip("设置已保存", "正在连接 " + ip + ":" + port);
                     ConnectToServer();
                 }
             }
             finally
             {
+                ApplyHotkeys();
+                SetKeyboardMode(resumeKeyboard, false);
+                if (linkMouse ? resumeKeyboard : resumeMouse)
+                    SetMouseMode(true, false);
+                UpdateStatus();
                 settingsOpen = false;
             }
         }
@@ -1180,7 +1638,14 @@ namespace TypeBridgeApp
             {
                 System.IO.File.WriteAllLines(
                     path,
-                    new string[] { "ip=" + ip, "port=" + port.ToString() },
+                    new string[]
+                    {
+                        "ip=" + ip,
+                        "port=" + port.ToString(),
+                        "keyboard_hotkey=" + keyboardHotkey.ToString(),
+                        "mouse_hotkey=" + mouseHotkey.ToString(),
+                        "mouse_with_keyboard=" + (linkMouse ? "1" : "0")
+                    },
                     new UTF8Encoding(false));
                 return true;
             }
@@ -1195,41 +1660,105 @@ namespace TypeBridgeApp
             }
         }
 
-        private void ToggleMode()
+        private void ToggleKeyboardMode()
         {
-            SetMode(!ubuntuMode, true);
+            bool target = !keyboardMode;
+            if (linkMouse)
+            {
+                SetKeyboardMode(target, false);
+                bool mouseSwitched = SetMouseMode(target, false);
+                if (target)
+                    ShowTrayTip("TypeBridge", mouseSwitched
+                        ? "键盘 + 鼠标 → Ubuntu"
+                        : "键盘 → Ubuntu（未连接，鼠标留在 Windows）");
+                else
+                    ShowTrayTip("TypeBridge", "键盘 + 鼠标 → Windows");
+            }
+            else
+            {
+                SetKeyboardMode(target, true);
+            }
         }
 
-        private void SetMode(bool remote, bool notify)
+        private void ToggleMouseMode()
         {
-            ubuntuMode = remote;
+            if (linkMouse)
+                return;
+            SetMouseMode(!mouseMode, true);
+        }
+
+        private void SetKeyboardMode(bool remote, bool notify)
+        {
+            keyboardMode = remote;
             hook.Enabled = remote;
+            UpdateStatus();
+            if (notify)
+                ShowTrayTip("TypeBridge", remote ? "键盘 → Ubuntu（使用 Ubuntu 输入法）" : "键盘 → Windows");
+        }
+
+        private bool SetMouseMode(bool remote, bool notify)
+        {
+            mouseHook.Connected = stream != null;
+
+            if (remote && stream == null)
+            {
+                if (notify)
+                    ShowTrayTip("鼠标未切换", "尚未连接 Ubuntu，请检查地址和网络");
+                return false;
+            }
+
             if (remote)
             {
                 mouseHook.ResetAnchor();
+                mouseHook.Enabled = true;
             }
             else
             {
                 mouseHook.ReleaseAll();
+                mouseHook.Enabled = false;
+                mouseHook.RestoreCursor();
             }
-            mouseHook.Enabled = remote;
+
+            mouseMode = remote;
             UpdateStatus();
             if (notify)
-                ShowTrayTip("TypeBridge", "当前输入：" + (remote ? "Ubuntu（键盘 + 鼠标）" : "Windows"));
+                ShowTrayTip("TypeBridge", remote ? "鼠标 → Ubuntu" : "鼠标 → Windows");
+            return true;
         }
 
         private void UpdateStatus()
         {
+            bool wasConnected = mouseHook.Connected;
             mouseHook.Connected = stream != null;
-            if (ubuntuMode)
+            if (mouseHook.Connected && !wasConnected && mouseMode && mouseHook.Enabled)
+                mouseHook.ResetAnchor();
+
+            if (linkMouse)
             {
-                tray.Text = stream != null ? "TypeBridge → Ubuntu（已连接）" : "TypeBridge → Ubuntu（未连接）";
-                toggleItem.Text = "切换到 Windows\tCtrl+Alt+U";
+                if (keyboardMode)
+                {
+                    tray.Text = stream != null
+                        ? "TypeBridge → Ubuntu（" + (mouseMode ? "键盘 + 鼠标" : "仅键盘") + "，已连接）"
+                        : "TypeBridge → Ubuntu（未连接）";
+                    toggleItem.Text = "切换到 Windows\t" + keyboardHotkey;
+                }
+                else
+                {
+                    tray.Text = "TypeBridge → Windows";
+                    toggleItem.Text = "切换到 Ubuntu（键盘 + 鼠标）\t" + keyboardHotkey;
+                }
+                mouseToggleItem.Visible = false;
             }
             else
             {
-                tray.Text = "TypeBridge → Windows";
-                toggleItem.Text = "切换到 Ubuntu\tCtrl+Alt+U";
+                tray.Text = "TypeBridge｜" + (stream != null ? "" : "未连接 ")
+                    + "键盘:" + (keyboardMode ? "Ubuntu" : "Windows")
+                    + " 鼠标:" + (mouseMode ? "Ubuntu" : "Windows");
+                toggleItem.Text = (keyboardMode ? "键盘切换到 Windows\t" : "键盘切换到 Ubuntu\t")
+                    + keyboardHotkey;
+                mouseToggleItem.Visible = true;
+                mouseToggleItem.Text = (mouseMode ? "鼠标切换到 Windows\t" : "鼠标切换到 Ubuntu\t")
+                    + mouseHotkey;
             }
         }
 
@@ -1240,7 +1769,7 @@ namespace TypeBridgeApp
 
         private void HookKey(object sender, BridgeKeyEventArgs e)
         {
-            if (!ubuntuMode)
+            if (!keyboardMode)
                 return;
             if (e.Text != null)
                 SendText(e.Text);
@@ -1250,21 +1779,21 @@ namespace TypeBridgeApp
 
         private void HookMouseMove(object sender, BridgeMouseMoveEventArgs e)
         {
-            if (!ubuntuMode)
+            if (!mouseMode)
                 return;
             SendLine("M " + e.Dx.ToString() + " " + e.Dy.ToString());
         }
 
         private void HookMouseButton(object sender, BridgeMouseButtonEventArgs e)
         {
-            if (!ubuntuMode)
+            if (!mouseMode)
                 return;
             SendLine("B " + e.Button.ToString() + (e.Down ? " down" : " up"));
         }
 
         private void HookMouseWheel(object sender, BridgeMouseWheelEventArgs e)
         {
-            if (!ubuntuMode)
+            if (!mouseMode)
                 return;
             SendLine("W " + e.Direction);
         }
@@ -1301,6 +1830,8 @@ namespace TypeBridgeApp
 
         private void CloseConnection()
         {
+            // 先补发鼠标 up，再断开，避免 Ubuntu 端卡在拖拽状态
+            mouseHook.ReleaseAll();
             try
             {
                 if (client != null)
@@ -1310,7 +1841,7 @@ namespace TypeBridgeApp
             client = null;
             stream = null;
             mouseHook.Connected = false;
-            mouseHook.ReleaseAll();
+            mouseHook.RestoreCursor();
         }
 
         private bool SendLine(string line)
@@ -1341,7 +1872,6 @@ namespace TypeBridgeApp
 
         protected override void ExitThreadCore()
         {
-            Program.LogInfo("ExitThreadCore");
             if (!disposed)
             {
                 disposed = true;

@@ -271,9 +271,23 @@ def inject_key(key):
         xdo("key", "--clearmodifiers", key)
 
 
-MOUSE_BUTTONS = {1, 2, 3, 4, 5, 6, 7, 8, 9}
+MOUSE_BUTTONS = {1, 2, 3, 8, 9}
 WHEEL_BUTTONS = {"up": 4, "down": 5, "left": 6, "right": 7}
 MOUSE_MAX_STEP = 2000
+PRESSED_BUTTONS = set()
+
+
+def release_mouse_buttons(reason):
+    """断开连接时松开仍按下的按钮，否则会卡在拖拽状态。"""
+    if not PRESSED_BUTTONS:
+        return
+    for button in sorted(PRESSED_BUTTONS):
+        try:
+            xdo("mouseup", str(button))
+        except Exception as e:
+            log("mouse release failed: %r" % (e,))
+    log("released mouse buttons %s (%s)" % (sorted(PRESSED_BUTTONS), reason))
+    PRESSED_BUTTONS.clear()
 
 
 def mouse_move(payload):
@@ -309,7 +323,10 @@ def mouse_button(payload):
     if button not in MOUSE_BUTTONS:
         log("unsupported mouse button: %r" % (payload,))
         return
-    log("mouse button %d %s" % (button, parts[1]))
+    if parts[1] == "down":
+        PRESSED_BUTTONS.add(button)
+    else:
+        PRESSED_BUTTONS.discard(button)
     xdo("mousedown" if parts[1] == "down" else "mouseup", str(button))
 
 
@@ -319,7 +336,6 @@ def mouse_wheel(payload):
     if button is None:
         log("bad W payload: %r" % (payload,))
         return
-    log("mouse wheel %s" % payload.strip())
     xdo("click", str(button))
 
 
@@ -418,6 +434,7 @@ def drop(fd, msg):
             st["sock"].close()
         except OSError:
             pass
+        release_mouse_buttons("disconnect")
     log(msg)
     return False
 
