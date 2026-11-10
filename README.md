@@ -264,6 +264,8 @@ mouse_with_keyboard=1
 
 - 客户端每 **4ms** 合并一次位移（250Hz），避免高频鼠标事件把每个像素都发成一个 TCP 包。
   默认频率可在 `typebridge.ini` 里用 `mouse_hz` 调整（50–1000），配合 1ms 定时器精度使用。
+- 合并定时器只在**鼠标接管且连接正常**时运行；没接管鼠标时定时器完全停掉，空闲不占 CPU、不唤醒。
+  停表前会把残留位移补发一次，所以松开接管瞬间的最后一段移动不会丢。
 - 连接建立时关闭 Nagle（`NoDelay`），小包立即发送；否则位移会攒到 ACK 才走，手感发黏。
 - 服务端用 **XTEST 直连注入**（`ctypes` 调 `libXtst`，约 1μs/次），而不是每条命令 fork 一次 `xdotool`（约 2.2ms/次）。
   实测 1000 次相对位移端到端 9ms，旧实现需要约 2.2 秒；`libXtst` 不可用时自动回退到 `xdotool`。
@@ -352,13 +354,13 @@ Windows 端使用低级键盘与鼠标钩子：
 在 Ubuntu 上执行：
 
 ```bash
-VERSION=3.2.1 bash ubuntu/build-deb.sh
+VERSION=3.3.1 bash ubuntu/build-deb.sh
 ```
 
 生成：
 
 ```text
-dist/typebridge_3.3.0_all.deb
+dist/typebridge_3.3.1_all.deb
 ```
 
 安装包包含 GTK 设置页、Ubuntu 服务端、桌面菜单入口和 systemd 用户服务。
