@@ -54,20 +54,20 @@ public sealed class ToastForm : Form {
         ShowInTaskbar = false;
         TopMost = true;
         StartPosition = FormStartPosition.Manual;
-        ClientSize = new Size(380, 84);
-        BackColor = Color.FromArgb(30, 30, 30);
+        ClientSize = new System.Drawing.Size(380, 84);
+        BackColor = System.Drawing.Color.FromArgb(30, 30, 30);
         Opacity = 0.96;
 
         titleLabel.AutoSize = false;
         titleLabel.SetBounds(16, 10, 348, 20);
-        titleLabel.ForeColor = Color.Silver;
-        titleLabel.Font = new Font("Microsoft YaHei", 9F);
+        titleLabel.ForeColor = System.Drawing.Color.Silver;
+        titleLabel.Font = new System.Drawing.Font("Microsoft YaHei", 9F);
         titleLabel.Text = "TypeBridge";
 
         messageLabel.AutoSize = false;
         messageLabel.SetBounds(16, 32, 348, 38);
-        messageLabel.ForeColor = Color.White;
-        messageLabel.Font = new Font("Microsoft YaHei", 11F, FontStyle.Bold);
+        messageLabel.ForeColor = System.Drawing.Color.White;
+        messageLabel.Font = new System.Drawing.Font("Microsoft YaHei", 11F, System.Drawing.FontStyle.Bold);
         messageLabel.AutoEllipsis = true;
 
         hideTimer.Interval = 1400;
@@ -96,8 +96,8 @@ public sealed class ToastForm : Form {
     public void ShowMessage(string title, string message) {
         titleLabel.Text = title;
         messageLabel.Text = message;
-        Rectangle workArea = Screen.FromPoint(Cursor.Position).WorkingArea;
-        Location = new Point(workArea.Right - Width - 24, workArea.Bottom - Height - 24);
+        System.Drawing.Rectangle workArea = System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position).WorkingArea;
+        Location = new System.Drawing.Point(workArea.Right - Width - 24, workArea.Bottom - Height - 24);
         hideTimer.Stop();
         hideTimer.Start();
         if (!Visible) { Show(); } else { Invalidate(); }
@@ -130,6 +130,8 @@ public sealed class GlobalKeyboardHook : IDisposable {
     private readonly HookProc callback;
     private IntPtr hook = IntPtr.Zero;
     private readonly HashSet<int> suppressedKeys = new HashSet<int>();
+    private readonly HashSet<int> modifierDown = new HashSet<int>();
+    private readonly HashSet<int> modifierUsed = new HashSet<int>();
 
     [DllImport("user32.dll", SetLastError=true)]
     private static extern IntPtr SetWindowsHookEx(int idHook, HookProc proc, IntPtr hMod, uint threadId);
@@ -157,6 +159,7 @@ public sealed class GlobalKeyboardHook : IDisposable {
 
     public bool Enabled { get; set; }
     public event EventHandler<BridgeKeyEventArgs> Key;
+    public event EventHandler ToggleRequested;
 
     public GlobalKeyboardHook() { callback = HookCallback; }
 
@@ -168,16 +171,46 @@ public sealed class GlobalKeyboardHook : IDisposable {
         }
     }
 
-    private static List<string> ActiveModifiers() {
+    private static string ModifierName(int virtualKey) {
+        switch (virtualKey) {
+            case 0xA0:
+            case 0xA1: return "shift";
+            case 0xA2:
+            case 0xA3: return "ctrl";
+            case 0xA4:
+            case 0xA5: return "alt";
+            case 0x5B:
+            case 0x5C: return "super";
+            default: return null;
+        }
+    }
+
+    private static bool IsModifierKey(int virtualKey) {
+        return ModifierName(virtualKey) != null;
+    }
+
+    private List<string> ActiveModifiers() {
         List<string> modifiers = new List<string>();
-        if (((GetAsyncKeyState(0xA2) & 0x8000) != 0) ||
-            ((GetAsyncKeyState(0xA3) & 0x8000) != 0)) { modifiers.Add("ctrl"); }
-        if (((GetAsyncKeyState(0xA4) & 0x8000) != 0) ||
-            ((GetAsyncKeyState(0xA5) & 0x8000) != 0)) { modifiers.Add("alt"); }
-        if ((GetAsyncKeyState(0x10) & 0x8000) != 0) { modifiers.Add("shift"); }
-        if (((GetAsyncKeyState(0x5B) & 0x8000) != 0) ||
-            ((GetAsyncKeyState(0x5C) & 0x8000) != 0)) { modifiers.Add("super"); }
+        if (modifierDown.Contains(0xA2) || modifierDown.Contains(0xA3)) { modifiers.Add("ctrl"); }
+        if (modifierDown.Contains(0xA4) || modifierDown.Contains(0xA5)) { modifiers.Add("alt"); }
+        if (modifierDown.Contains(0xA0) || modifierDown.Contains(0xA1)) { modifiers.Add("shift"); }
+        if (modifierDown.Contains(0x5B) || modifierDown.Contains(0x5C)) { modifiers.Add("super"); }
         return modifiers;
+    }
+
+    private void MarkModifiersUsed() {
+        foreach (int key in modifierDown) { modifierUsed.Add(key); }
+    }
+
+    private bool RaiseKey(string text, string keyName) {
+        EventHandler<BridgeKeyEventArgs> handler = Key;
+        if (handler == null) { return false; }
+        try {
+            handler(this, new BridgeKeyEventArgs(text, keyName));
+            return true;
+        } catch {
+            return false;
+        }
     }
 
     private static bool IsToggleHotKey(int virtualKey, List<string> modifiers) {
@@ -188,6 +221,9 @@ public sealed class GlobalKeyboardHook : IDisposable {
     }
 
     private static string SpecialKeyName(int virtualKey) {
+        if (virtualKey >= 0x70 && virtualKey <= 0x87) {
+            return "F" + (virtualKey - 0x6F).ToString();
+        }
         switch ((Keys)virtualKey) {
             case Keys.Back: return "BackSpace";
             case Keys.Return: return "Return";
@@ -204,6 +240,35 @@ public sealed class GlobalKeyboardHook : IDisposable {
             case Keys.Down: return "Down";
             case Keys.Left: return "Left";
             case Keys.Right: return "Right";
+            case Keys.CapsLock: return "CapsLock";
+            case Keys.NumLock: return "NumLock";
+            case Keys.Scroll: return "ScrollLock";
+            case Keys.PrintScreen: return "PrintScreen";
+            case Keys.Pause: return "Pause";
+            case Keys.Apps: return "Menu";
+            case Keys.NumPad0: return "KP_0";
+            case Keys.NumPad1: return "KP_1";
+            case Keys.NumPad2: return "KP_2";
+            case Keys.NumPad3: return "KP_3";
+            case Keys.NumPad4: return "KP_4";
+            case Keys.NumPad5: return "KP_5";
+            case Keys.NumPad6: return "KP_6";
+            case Keys.NumPad7: return "KP_7";
+            case Keys.NumPad8: return "KP_8";
+            case Keys.NumPad9: return "KP_9";
+            case Keys.Multiply: return "KP_Multiply";
+            case Keys.Add: return "KP_Add";
+            case Keys.Separator: return "KP_Separator";
+            case Keys.Subtract: return "KP_Subtract";
+            case Keys.Decimal: return "KP_Decimal";
+            case Keys.Divide: return "KP_Divide";
+            case Keys.VolumeMute: return "VolumeMute";
+            case Keys.VolumeDown: return "VolumeDown";
+            case Keys.VolumeUp: return "VolumeUp";
+            case Keys.MediaNextTrack: return "MediaNextTrack";
+            case Keys.MediaPreviousTrack: return "MediaPrevTrack";
+            case Keys.MediaStop: return "MediaStop";
+            case Keys.MediaPlayPause: return "MediaPlayPause";
             default: return null;
         }
     }
@@ -261,31 +326,55 @@ public sealed class GlobalKeyboardHook : IDisposable {
                 KbdData data = (KbdData)Marshal.PtrToStructure(lParam, typeof(KbdData));
                 int vk = (int)data.VkCode;
                 if (up) {
+                    if (IsModifierKey(vk)) {
+                        bool wasDown = modifierDown.Remove(vk);
+                        bool wasUsed = modifierUsed.Remove(vk);
+                        suppressedKeys.Remove(vk);
+                        if (wasDown && !wasUsed && Enabled) {
+                            string modifier = ModifierName(vk);
+                            if (modifier != null) { RaiseKey(null, modifier); }
+                        }
+                        if (wasDown) { return (IntPtr)1; }
+                    }
                     if (suppressedKeys.Remove(vk)) { return (IntPtr)1; }
                     return CallNextHookEx(hook, nCode, wParam, lParam);
                 }
-                if (Enabled) {
-                    List<string> modifiers = ActiveModifiers();
-                    if (!IsToggleHotKey(vk, modifiers)) {
-                        string baseKey = BaseKeyName(vk);
-                        string text = null;
-                        string keyName = null;
-                        if (modifiers.Count > 0 && baseKey != null) {
-                            keyName = string.Join("+", modifiers.ToArray()) + "+" + baseKey;
-                        } else if (modifiers.Count == 0) {
-                            keyName = SpecialKeyName(vk);
-                            if (keyName == null) { text = KeyText(data); }
-                        }
-                        if (text != null || keyName != null) {
-                            suppressedKeys.Add(vk);
-                            EventHandler<BridgeKeyEventArgs> handler = Key;
-                            if (handler != null) {
-                                try { handler(this, new BridgeKeyEventArgs(text, keyName)); }
-                                catch { }
-                            }
-                            return (IntPtr)1;
-                        }
+                if (!Enabled) {
+                    return CallNextHookEx(hook, nCode, wParam, lParam);
+                }
+                if (IsModifierKey(vk)) {
+                    if (modifierDown.Add(vk)) { suppressedKeys.Add(vk); }
+                    return (IntPtr)1;
+                }
+                List<string> modifiers = ActiveModifiers();
+                if (IsToggleHotKey(vk, modifiers)) {
+                    MarkModifiersUsed();
+                    suppressedKeys.Add(vk);
+                    EventHandler toggle = ToggleRequested;
+                    if (toggle != null) {
+                        try { toggle(this, EventArgs.Empty); }
+                        catch { }
                     }
+                    return (IntPtr)1;
+                }
+                string baseKey = BaseKeyName(vk);
+                string text = null;
+                string keyName = null;
+                if (baseKey != null) {
+                    if (modifiers.Count > 0) {
+                        keyName = string.Join("+", modifiers.ToArray()) + "+" + baseKey;
+                        MarkModifiersUsed();
+                    } else {
+                        keyName = SpecialKeyName(vk);
+                        if (keyName == null) { text = KeyText(data); }
+                    }
+                } else {
+                    text = KeyText(data);
+                }
+                if (text != null || keyName != null) {
+                    suppressedKeys.Add(vk);
+                    RaiseKey(text, keyName);
+                    return (IntPtr)1;
                 }
             }
         }
@@ -515,6 +604,7 @@ $hook.add_Key({
     elseif ($e.KeyName) { [void](Send-Line ("K " + $e.KeyName)) }
 })
 $form.add_HotKeyPressed({ Toggle-Mode })
+$hook.add_ToggleRequested({ Toggle-Mode })
 $toggleItem.add_Click({ Toggle-Mode })
 $settingsItem.add_Click({ Show-SettingsDialog $false })
 $tray.add_DoubleClick({ Toggle-Mode })

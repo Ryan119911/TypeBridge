@@ -55,11 +55,27 @@ KEYMAP = {
     "Page_Up": "Prior", "Page_Down": "Next",
     "Space": "space", "space": "space",
     "Insert": "Insert",
+    "CapsLock": "Caps_Lock", "NumLock": "Num_Lock", "ScrollLock": "Scroll_Lock",
+    "PrintScreen": "Print", "Pause": "Pause", "Menu": "Menu",
     "semicolon": "semicolon", "slash": "slash", "grave": "grave",
     "bracketleft": "bracketleft", "bracketright": "bracketright",
     "minus": "minus", "equal": "equal", "comma": "comma", "period": "period",
     "backslash": "backslash", "apostrophe": "apostrophe",
-    "Win": "super", "Super": "super", "Meta": "super",
+    "ctrl": "Control_L", "shift": "Shift_L", "alt": "Alt_L", "super": "Super_L",
+    "Win": "Super_L", "Super": "Super_L", "Meta": "Super_L",
+    "KP_0": "0", "KP_1": "1", "KP_2": "2", "KP_3": "3",
+    "KP_4": "4", "KP_5": "5", "KP_6": "6", "KP_7": "7",
+    "KP_8": "8", "KP_9": "9",
+    "KP_Multiply": "asterisk", "KP_Add": "plus",
+    "KP_Separator": "comma", "KP_Subtract": "minus",
+    "KP_Decimal": "period", "KP_Divide": "slash",
+    "VolumeMute": "XF86AudioMute",
+    "VolumeDown": "XF86AudioLowerVolume",
+    "VolumeUp": "XF86AudioRaiseVolume",
+    "MediaNextTrack": "XF86AudioNext",
+    "MediaPrevTrack": "XF86AudioPrev",
+    "MediaStop": "XF86AudioStop",
+    "MediaPlayPause": "XF86AudioPlay",
 }
 
 MODIFIERS = {
@@ -243,6 +259,15 @@ def inject_text(text):
             paste_text(s, cls)
 
 
+def inject_key(key):
+    """注入按键。锁定键不能清修饰状态，否则会改变键盘锁定状态。"""
+    base = key.split("+")[-1]
+    if base in {"Caps_Lock", "Num_Lock", "Scroll_Lock"}:
+        xdo("key", key)
+    else:
+        xdo("key", "--clearmodifiers", key)
+
+
 def handle_line(line, sock):
     """返回 False 表示对端请求断开(QUIT)"""
     if line == "PING":
@@ -266,7 +291,7 @@ def handle_line(line, sock):
     elif cmd == "K":
         key = normalize_key(payload)
         if key:
-            xdo("key", "--clearmodifiers", key)
+            inject_key(key)
         else:
             log("unsupported K payload: %r" % payload)
     return True
