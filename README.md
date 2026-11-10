@@ -318,6 +318,7 @@ TypeBridge/
 ├─ TypeBridge.cs                 Windows 客户端源码
 ├─ TypeBridge.ps1                PowerShell 备用实现
 ├─ typebridge-ubuntu.py          Ubuntu 服务端
+├─ assets/                       应用图标 SVG / PNG / ICO
 ├─ ubuntu/
 │  ├─ typebridge-ui.py           Ubuntu GTK 设置页
 │  ├─ typebridge-ui              应用启动器
