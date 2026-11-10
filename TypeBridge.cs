@@ -1482,7 +1482,17 @@ namespace TypeBridgeApp
             ShowHotkeyTip();
             if (!configLoaded)
             {
-                hotkeyForm.BeginInvoke(new Action(delegate { ShowSettings(true); }));
+                // 首次运行：等消息循环真正跑起来再弹设置窗口。
+                // 构造函数里直接 ShowDialog 或 BeginInvoke 在部分环境下不会显示。
+                Timer firstRunTimer = new Timer();
+                firstRunTimer.Interval = 250;
+                firstRunTimer.Tick += delegate
+                {
+                    firstRunTimer.Stop();
+                    firstRunTimer.Dispose();
+                    ShowSettings(true);
+                };
+                firstRunTimer.Start();
             }
         }
 
