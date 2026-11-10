@@ -132,6 +132,8 @@ public sealed class GlobalKeyboardHook : IDisposable {
     private readonly HashSet<int> suppressedKeys = new HashSet<int>();
     private readonly HashSet<int> modifierDown = new HashSet<int>();
     private readonly HashSet<int> modifierUsed = new HashSet<int>();
+    private bool enabled;
+    private bool capsLockState;
 
     [DllImport("user32.dll", SetLastError=true)]
     private static extern IntPtr SetWindowsHookEx(int idHook, HookProc proc, IntPtr hMod, uint threadId);
@@ -157,7 +159,13 @@ public sealed class GlobalKeyboardHook : IDisposable {
     private static extern int ToUnicodeEx(uint virtualKey, uint scanCode, byte[] keyState,
         [Out] StringBuilder text, int textSize, uint flags, IntPtr layout);
 
-    public bool Enabled { get; set; }
+    public bool Enabled {
+        get { return enabled; }
+        set {
+            enabled = value;
+            if (value) { capsLockState = (GetKeyState(0x14) & 1) != 0; }
+        }
+    }
     public event EventHandler<BridgeKeyEventArgs> Key;
     public event EventHandler ToggleRequested;
 
@@ -301,10 +309,10 @@ public sealed class GlobalKeyboardHook : IDisposable {
         }
     }
 
-    private static string KeyText(KbdData data) {
+    private string KeyText(KbdData data) {
         byte[] state = new byte[256];
         if ((GetAsyncKeyState(0x10) & 0x8000) != 0) { state[0x10] = 0x80; }
-        if ((GetKeyState(0x14) & 1) != 0) { state[0x14] = 0x01; }
+        if (capsLockState) { state[0x14] = 0x01; }
         if ((GetKeyState(0x90) & 1) != 0) { state[0x90] = 0x01; }
         uint thread = GetWindowThreadProcessId(GetForegroundWindow(), IntPtr.Zero);
         IntPtr layout = GetKeyboardLayout(thread);
@@ -341,6 +349,11 @@ public sealed class GlobalKeyboardHook : IDisposable {
                 }
                 if (!Enabled) {
                     return CallNextHookEx(hook, nCode, wParam, lParam);
+                }
+                if (vk == (int)Keys.CapsLock) {
+                    capsLockState = !capsLockState;
+                    suppressedKeys.Add(vk);
+                    return (IntPtr)1;
                 }
                 if (IsModifierKey(vk)) {
                     if (modifierDown.Add(vk)) { suppressedKeys.Add(vk); }
