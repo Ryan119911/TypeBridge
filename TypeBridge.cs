@@ -73,19 +73,6 @@ namespace TypeBridgeApp
             }
             catch { }
         }
-
-        internal static void LogInfo(string message)
-        {
-            try
-            {
-                string path = System.IO.Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory, "typebridge-error.log");
-                System.IO.File.AppendAllText(
-                    path,
-                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " INFO " + message + "\r\n");
-            }
-            catch { }
-        }
     }
 
     internal sealed class HotkeyForm : Form
@@ -751,7 +738,6 @@ namespace TypeBridgeApp
             {
                 hotkeyForm.BeginInvoke(new Action(delegate { ShowSettings(true); }));
             }
-            Program.LogInfo("started, icon=" + (appIcon == null ? "null" : "ok"));
         }
 
         private static Icon LoadAppIcon()
@@ -976,7 +962,6 @@ namespace TypeBridgeApp
 
         protected override void ExitThreadCore()
         {
-            Program.LogInfo("ExitThreadCore");
             if (!disposed)
             {
                 disposed = true;
