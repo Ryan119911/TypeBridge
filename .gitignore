@@ -3,6 +3,8 @@ typebridge.ini
 
 # 本地构建产物
 *.exe
+*.deb
+dist/
 build/
 obj/
 bin/

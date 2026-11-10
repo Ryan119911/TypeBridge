@@ -4,15 +4,19 @@
 
 TypeBridge 是一个无窗口、托盘常驻的 Windows 输入桥。它只转发键盘输入，不传画面、不控制鼠标。中文不在 Windows 端提交，而是把拼音和候选选择键送到 Ubuntu，由 **Ubuntu 输入法**完成组词和选字。
 
-[![Build Windows EXE](https://github.com/Ryan119911/TypeBridge/actions/workflows/build.yml/badge.svg)](https://github.com/Ryan119911/TypeBridge/actions/workflows/build.yml)
+[![Build TypeBridge](https://github.com/Ryan119911/TypeBridge/actions/workflows/build.yml/badge.svg)](https://github.com/Ryan119911/TypeBridge/actions/workflows/build.yml)
 [![Latest release](https://img.shields.io/github/v/release/Ryan119911/TypeBridge)](https://github.com/Ryan119911/TypeBridge/releases)
 
 ## 下载
 
-- 最新 EXE：<https://github.com/Ryan119911/TypeBridge/releases/latest>
+- Windows：`TypeBridge.exe`
+- Ubuntu 22.04（图形安装）：`typebridge_<版本>_all.deb`
+- 最新版本：<https://github.com/Ryan119911/TypeBridge/releases/latest>
 - 项目源码：<https://github.com/Ryan119911/TypeBridge>
 
 每台 Windows 都连接**它自己填写的 Ubuntu**。项目没有中央服务器，也不会连接到发布者的电脑。
+
+Ubuntu 安装包会创建应用菜单入口和开机自启的 systemd 用户服务。安装完成后不需要在 Ubuntu 终端执行命令。
 
 ## 特性
 
@@ -26,6 +30,7 @@ TypeBridge 是一个无窗口、托盘常驻的 Windows 输入桥。它只转发
 - **组合键**：Ctrl/Alt/Win + 字母、数字、功能键，例如 `Ctrl+A`、`Alt+B`、`Win+E`。
 - **独立配置**：首次运行填入自己的 Ubuntu IP 和端口，保存在本地 `typebridge.ini`。
 - **低依赖**：Windows 端使用系统自带 .NET Framework；Ubuntu 端只需要 Python 3、GTK、xdotool 和可用的 X11 输入法。
+- **Ubuntu 图形设置页**：`.deb` 安装后从应用菜单打开，可查看服务状态、显示本机 IP、复制地址、修改端口和启停服务。
 - **单实例**：重复启动会自动退出第二个实例，避免重复键盘钩子。
 
 ## 架构
@@ -65,7 +70,25 @@ TypeBridge 是一个无窗口、托盘常驻的 Windows 输入桥。它只转发
 
 ## 快速开始
 
-### 1. 准备 Ubuntu
+### 1. 安装 Ubuntu 端（推荐：图形安装）
+
+1. 从 Releases 下载 `typebridge_<版本>_all.deb`。
+2. 双击安装包，在“软件安装”中点击安装，输入一次管理员密码。
+3. 安装完成后，在 Ubuntu 应用菜单中搜索并打开 **TypeBridge**。
+4. 设置页会显示服务状态、本机 IP、端口和连接信息。
+
+Ubuntu 设置页可以完成：
+
+- 查看服务是否运行；
+- 查看自动启动状态；
+- 复制 Windows 端需要填写的 IP；
+- 启动、停止、重新启动服务；
+- 修改 TCP 端口并保存；
+- 通过系统授权窗口放行 ufw 防火墙端口。
+
+日用不需要执行 `systemctl` 或 Python 命令。
+
+#### 手动安装（开发者备选）
 
 要求：
 
@@ -144,7 +167,7 @@ sudo ufw allow 4321/tcp
 tailscale ip -4
 ```
 
-例如输出 `100.x.y.z`。也可以使用局域网 IP 或主机名。
+例如输出 `100.x.y.z`。也可以使用局域网 IP 或主机名。图形设置页会自动列出 Tailscale 和局域网地址，无需手动执行此命令。
 
 ### 2. 配置 Windows
 
@@ -242,7 +265,7 @@ Windows 端使用低级键盘钩子：
 
 ### GitHub Actions
 
-仓库自带 `.github/workflows/build.yml`。每次推送到 `main` 会生成构建产物；推送 `v*` 标签会自动创建 Release 并附带 `TypeBridge.exe`。
+仓库自带 `.github/workflows/build.yml`。每次推送到 `main` 会生成 Windows EXE 和 Ubuntu DEB 构建产物；推送 `v*` 标签会自动创建 Release 并附带 `TypeBridge.exe` 与 `typebridge_<版本>_all.deb`。
 
 ### Windows 本地构建
 
@@ -265,6 +288,22 @@ Windows 端使用低级键盘钩子：
 
 `/target:winexe` 保证运行时不出现控制台窗口。
 
+### Ubuntu DEB 本地打包
+
+在 Ubuntu 上执行：
+
+```bash
+VERSION=3.2.0 bash ubuntu/build-deb.sh
+```
+
+生成：
+
+```text
+dist/typebridge_3.2.0_all.deb
+```
+
+安装包包含 GTK 设置页、Ubuntu 服务端、桌面菜单入口和 systemd 用户服务。
+
 ### PowerShell 备用版
 
 仓库同时保留 `TypeBridge.ps1` 和 `启动输入桥.vbs`，适合不编译 EXE 时直接运行。双击 VBS 可以无终端启动 PowerShell 版；正式分发仍建议使用 EXE。
@@ -276,6 +315,12 @@ TypeBridge/
 ├─ TypeBridge.cs                 Windows 客户端源码
 ├─ TypeBridge.ps1                PowerShell 备用实现
 ├─ typebridge-ubuntu.py          Ubuntu 服务端
+├─ ubuntu/
+│  ├─ typebridge-ui.py           Ubuntu GTK 设置页
+│  ├─ typebridge-ui              应用启动器
+│  ├─ typebridge.desktop         应用菜单入口
+│  ├─ typebridge.service         systemd 用户服务
+│  └─ build-deb.sh               DEB 打包脚本
 ├─ build.bat                     本地 EXE 构建脚本
 ├─ typebridge.example.ini        Windows 配置模板
 ├─ 启动输入桥.vbs                 无终端启动 PowerShell 版
@@ -284,7 +329,7 @@ TypeBridge/
 └─ README.md
 ```
 
-`typebridge.ini`、`*.exe`、`__pycache__/` 等本机文件已加入 `.gitignore`。
+`typebridge.ini`、`*.exe`、`*.deb`、`dist/`、`__pycache__/` 等本机文件已加入 `.gitignore`。
 
 ## 常见问题
 
