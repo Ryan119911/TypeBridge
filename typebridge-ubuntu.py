@@ -276,14 +276,77 @@ WHEEL_BUTTONS = {"up": 4, "down": 5, "left": 6, "right": 7}
 MOUSE_MAX_STEP = 2000
 PRESSED_BUTTONS = set()
 
+# 指针注入优先走 XTEST 直连：一次调用约 1 微秒。
+# xdotool 每条命令都要 fork 一个进程（实测约 2.2ms），250Hz 以上根本跟不上，
+# 表现就是指针一顿一顿。XTEST 不可用时才回退到 xdotool。
+try:
+    import ctypes
+
+    _x11 = ctypes.CDLL("libX11.so.6")
+    _xtst = ctypes.CDLL("libXtst.so.6")
+    _x11.XOpenDisplay.restype = ctypes.c_void_p
+    _x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    _x11.XFlush.argtypes = [ctypes.c_void_p]
+    _DPY = _x11.XOpenDisplay(None)
+    if _DPY:
+        _xtst.XTestFakeRelativeMotionEvent.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_ulong]
+        _xtst.XTestFakeButtonEvent.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
+    else:
+        _xtst = None
+except Exception as _xtest_error:
+    _DPY = None
+    _xtst = None
+    log("XTEST unavailable (%r)，回退到 xdotool" % (_xtest_error,))
+
+_pending_dx = 0
+_pending_dy = 0
+
+
+def pointer_move(dx, dy):
+    if _DPY:
+        _xtst.XTestFakeRelativeMotionEvent(_DPY, dx, dy, 0)
+        _x11.XFlush(_DPY)
+    else:
+        xdo("mousemove_relative", "--", str(dx), str(dy))
+
+
+def pointer_button(button, down):
+    if _DPY:
+        _xtst.XTestFakeButtonEvent(_DPY, button, 1 if down else 0, 0)
+        _x11.XFlush(_DPY)
+    else:
+        xdo("mousedown" if down else "mouseup", str(button))
+
+
+def pointer_wheel(button):
+    if _DPY:
+        _xtst.XTestFakeButtonEvent(_DPY, button, 1, 0)
+        _xtst.XTestFakeButtonEvent(_DPY, button, 0, 0)
+        _x11.XFlush(_DPY)
+    else:
+        xdo("click", str(button))
+
+
+def flush_move():
+    """把积攒的位移一次性注入。一批里连着多条 M 时合并成一次 X 调用。"""
+    global _pending_dx, _pending_dy
+    dx, dy = _pending_dx, _pending_dy
+    _pending_dx = 0
+    _pending_dy = 0
+    if dx or dy:
+        pointer_move(dx, dy)
+
 
 def release_mouse_buttons(reason):
     """断开连接时松开仍按下的按钮，否则会卡在拖拽状态。"""
     if not PRESSED_BUTTONS:
         return
+    flush_move()
     for button in sorted(PRESSED_BUTTONS):
         try:
-            xdo("mouseup", str(button))
+            pointer_button(button, False)
         except Exception as e:
             log("mouse release failed: %r" % (e,))
     log("released mouse buttons %s (%s)" % (sorted(PRESSED_BUTTONS), reason))
@@ -291,7 +354,8 @@ def release_mouse_buttons(reason):
 
 
 def mouse_move(payload):
-    """M <dx> <dy>：相对移动指针。"""
+    """M <dx> <dy>：相对移动指针。先累加，等这批 M 行处理完由 flush_move 一次注入。"""
+    global _pending_dx, _pending_dy
     parts = payload.split()
     if len(parts) != 2:
         log("bad M payload: %r" % (payload,))
@@ -304,9 +368,8 @@ def mouse_move(payload):
         return
     dx = max(-MOUSE_MAX_STEP, min(MOUSE_MAX_STEP, dx))
     dy = max(-MOUSE_MAX_STEP, min(MOUSE_MAX_STEP, dy))
-    if dx == 0 and dy == 0:
-        return
-    xdo("mousemove_relative", "--", str(dx), str(dy))
+    _pending_dx = max(-MOUSE_MAX_STEP, min(MOUSE_MAX_STEP, _pending_dx + dx))
+    _pending_dy = max(-MOUSE_MAX_STEP, min(MOUSE_MAX_STEP, _pending_dy + dy))
 
 
 def mouse_button(payload):
@@ -323,11 +386,12 @@ def mouse_button(payload):
     if button not in MOUSE_BUTTONS:
         log("unsupported mouse button: %r" % (payload,))
         return
+    flush_move()   # 点击必须落在最新位置
     if parts[1] == "down":
         PRESSED_BUTTONS.add(button)
     else:
         PRESSED_BUTTONS.discard(button)
-    xdo("mousedown" if parts[1] == "down" else "mouseup", str(button))
+    pointer_button(button, parts[1] == "down")
 
 
 def mouse_wheel(payload):
@@ -336,7 +400,8 @@ def mouse_wheel(payload):
     if button is None:
         log("bad W payload: %r" % (payload,))
         return
-    xdo("click", str(button))
+    flush_move()
+    pointer_wheel(button)
 
 
 def handle_line(line, sock):
@@ -379,13 +444,18 @@ def process_buffer(st):
     while b"\n" in buf:
         raw, buf = buf.split(b"\n", 1)
         line = raw.decode("utf-8", "replace").rstrip("\r")
+        # 非位移指令前先把积攒的位移落下去，保证"先移动后点击"的顺序
+        if line[:1] != "M":
+            flush_move()
         try:
             if not handle_line(line, sock):
                 st["buf"] = buf
+                flush_move()
                 return False
         except Exception as e:
             log("handle error: %r" % (e,))
     st["buf"] = buf
+    flush_move()
     return True
 
 
