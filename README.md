@@ -22,6 +22,7 @@ TypeBridge 是一个无窗口、托盘常驻的 Windows 输入桥。它只转发
 - **Ubuntu 输入法选字**：拼音字母、数字、空格发往 Ubuntu，候选窗口由 Ubuntu 输入法显示。
 - **发送后不堆字**：Ubuntu 模式下的按键不会同时进入 Windows 当前软件。
 - **特殊按键**：方向键、PageUp/PageDown、Esc、Tab、Insert。
+- **全键盘转发**：独立 Ctrl/Shift/Alt/Win、F1–F24、CapsLock/NumLock、小键盘、PrintScreen 和媒体键。
 - **组合键**：Ctrl/Alt/Win + 字母、数字、功能键，例如 `Ctrl+A`、`Alt+B`、`Win+E`。
 - **独立配置**：首次运行填入自己的 Ubuntu IP 和端口，保存在本地 `typebridge.ini`。
 - **低依赖**：Windows 端使用系统自带 .NET Framework；Ubuntu 端只需要 Python 3、GTK、xdotool 和可用的 X11 输入法。
@@ -183,10 +184,16 @@ port=4321
 | Esc | `K Escape` |
 | Tab | `K Tab` |
 | Insert | `K Insert` |
+| F1–F24 | `K F1` … `K F24` |
+| 独立 Ctrl / Shift / Alt / Win | 松开修饰键时补发单键，Ubuntu 能收到独立按键 |
+| CapsLock / NumLock / ScrollLock | 注入锁定键，并保持当前锁定状态 |
+| PrintScreen / Pause / Menu | 注入对应 X11 按键 |
+| 小键盘 0–9 与运算符 | 注入数字和 `+ - * / .`，不会改变 NumLock 状态 |
+| 音量、播放/暂停、上一曲/下一曲、停止 | 注入对应媒体键 |
 | Ctrl/Alt/Win + 字母、数字、功能键 | `K ctrl+a`、`K alt+b`、`K super+e` 等组合 |
 | `Ctrl + Alt + U` | 仅切换模式，不发送到 Ubuntu |
 
-在 Ubuntu 模式下，被转发的按键不会再进入 Windows 当前软件；单独的 Ctrl、Alt、Win 修饰键不会被拦截。
+在 Ubuntu 模式下，所有被转发的按键都不会再进入 Windows 当前软件；单独的 Ctrl、Alt、Win 也会在松开时发送到 Ubuntu。
 
 ## 安全说明
 
@@ -217,6 +224,12 @@ Windows 端使用低级键盘钩子：
 | `K Prior / Next` | PageUp / PageDown |
 | `K Escape / Tab / Insert` | Esc、Tab、Insert |
 | `K Space` | 空格，大小写键名均可 |
+| `K F1` … `K F24` | 功能键 |
+| `K ctrl / shift / alt / super` | 独立修饰键 |
+| `K CapsLock / NumLock / ScrollLock` | 锁定键 |
+| `K PrintScreen / Pause / Menu` | 打印屏幕、暂停、菜单键 |
+| `K KP_0` … `K KP_9` | 小键盘数字，映射为普通数字，避免改变 NumLock |
+| `K VolumeUp / VolumeDown / VolumeMute` | 音量键 |
 | `K ctrl+a` / `K alt+b` / `K super+e` | 组合键，支持 `ctrl / alt / shift / super` |
 | `PING` | 连通性测试，返回 `PONG` |
 | `QUIT` | 断开连接 |
@@ -327,6 +340,8 @@ systemctl --user restart typebridge
 - 仅支持 X11；Wayland 原生会话未验证。
 - 不传输画面，不控制鼠标，不支持远程桌面场景。
 - 依赖 Ubuntu 输入法本身；TypeBridge 不提供候选词界面。
-- 目标程序必须能接收 X11 键盘事件；部分全屏游戏或使用原始输入的程序可能不兼容。
+- 部分全屏游戏或使用原始输入的程序可能不兼容。
+- `Ctrl + Alt + Delete` 等 Windows 安全注意序列由操作系统保留，无法转发。
+- 键盘厂商自定义的额外按键可能没有标准 X11 键名。
 - 明文 TCP 协议，必须配合 Tailscale、可信局域网和防火墙使用。
 - `Ctrl + Alt + U` 为保留快捷键，不转发到 Ubuntu。
