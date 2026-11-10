@@ -1,238 +1,330 @@
-# TypeBridge：Windows 键盘无窗口转发到 Ubuntu
+# TypeBridge
 
-TypeBridge 把 Windows 上的按键转发到 Ubuntu 当前焦点窗口。程序只常驻系统托盘，没有输入窗口；拼音输入和候选选字都由 **Ubuntu 输入法**完成。
+**在 Windows 上直接打字，把键盘输入实时发送到 Ubuntu 当前焦点窗口。**
+
+TypeBridge 是一个无窗口、托盘常驻的 Windows 输入桥。它只转发键盘输入，不传画面、不控制鼠标。中文不在 Windows 端提交，而是把拼音和候选选择键送到 Ubuntu，由 **Ubuntu 输入法**完成组词和选字。
+
+[![Build Windows EXE](https://github.com/Ryan119911/TypeBridge/actions/workflows/build.yml/badge.svg)](https://github.com/Ryan119911/TypeBridge/actions/workflows/build.yml)
+[![Latest release](https://img.shields.io/github/v/release/Ryan119911/TypeBridge)](https://github.com/Ryan119911/TypeBridge/releases)
 
 ## 下载
 
-Windows EXE：
+- 最新 EXE：<https://github.com/Ryan119911/TypeBridge/releases/latest>
+- 项目源码：<https://github.com/Ryan119911/TypeBridge>
 
-https://github.com/Ryan119911/TypeBridge/releases/latest
+每台 Windows 都连接**它自己填写的 Ubuntu**。项目没有中央服务器，也不会连接到发布者的电脑。
 
-每台 Windows 都填写自己的 Ubuntu IP，不会连接到发布者的电脑。
+## 特性
 
-## 1. 工作方式
+- **无输入窗口**：启动后只常驻系统托盘，不打断正常 Windows 输入。
+- **全局切换**：在任何软件中按 `Ctrl + Alt + U`，在 Windows 输入和 Ubuntu 输入之间切换。
+- **Ubuntu 输入法选字**：拼音字母、数字、空格发往 Ubuntu，候选窗口由 Ubuntu 输入法显示。
+- **发送后不堆字**：Ubuntu 模式下的按键不会同时进入 Windows 当前软件。
+- **特殊按键**：方向键、PageUp/PageDown、Esc、Tab、Insert。
+- **组合键**：Ctrl/Alt/Win + 字母、数字、功能键，例如 `Ctrl+A`、`Alt+B`、`Win+E`。
+- **独立配置**：首次运行填入自己的 Ubuntu IP 和端口，保存在本地 `typebridge.ini`。
+- **低依赖**：Windows 端使用系统自带 .NET Framework；Ubuntu 端只需要 Python 3、GTK、xdotool 和可用的 X11 输入法。
+- **单实例**：重复启动会自动退出第二个实例，避免重复键盘钩子。
+
+## 架构
 
 ```text
-Windows 键盘
-    │
-    ├─ Windows 模式：所有按键正常进入 Windows
-    │
-    └─ Ubuntu 模式：字母、数字、标点、空格、退格、回车、
-              方向键、PageUp/PageDown、Esc、Tab、Insert，
-              以及 Ctrl/Alt/Win 组合键
-              │  TCP / Tailscale，加密传输
-              ▼
-        Ubuntu typebridge.py
-              │  xdotool
-              ▼
-        Ubuntu 当前焦点窗口 + Ubuntu 输入法
+┌──────────────────────────────┐
+│ Windows 10/11                │
+│                              │
+│  TypeBridge.exe              │
+│    ├─ 托盘图标 / 设置窗口     │
+│    ├─ Ctrl+Alt+U 模式切换    │
+│    └─ 低级键盘钩子            │
+└──────────────┬───────────────┘
+               │ TCP 4321
+               │ Tailscale / 局域网
+               ▼
+┌──────────────────────────────┐
+│ Ubuntu 22.04 (X11)           │
+│                              │
+│  typebridge.py               │
+│    ├─ 行协议服务器            │
+│    ├─ xdotool 注入按键        │
+│    └─ Ubuntu 输入法处理拼音   │
+└──────────────┬───────────────┘
+               ▼
+       Ubuntu 当前焦点窗口
 ```
 
-使用流程：
+### 两种输入模式
 
-1. 开启 TypeBridge 后，Windows 一切照常，没有输入窗口。
-2. 在任意 Windows 软件中按 **`Ctrl + Alt + U`**。
-3. 直接在键盘上输入拼音；字母会发到 Ubuntu，Ubuntu 输入法显示候选。
-4. 用数字键或空格选字，按退格删除，按回车确认。
-5. 再按 **`Ctrl + Alt + U`**，立即恢复 Windows 输入。
-
-程序不会在 Windows 中启动微信输入法组词，Windows 也不显示输入窗口。
-
-## 2. 文件说明
-
-| 文件 | 用途 |
+| 模式 | 行为 |
 |---|---|
-| `TypeBridge.exe` | 编译后的原生 Windows 程序；运行后只有托盘图标 |
-| `TypeBridge-v2-windowed.exe` | 旧版窗口式程序备份，不要使用 |
-| `TypeBridge.cs` | EXE 的完整 C# 源码，无第三方依赖 |
-| `build.bat` | 调用 Windows 自带 .NET Framework 编译器生成 EXE |
-| `TypeBridge.ps1` | 可立即运行的 PowerShell 实现，架构与 EXE 相同 |
-| `typebridge-ubuntu.py` | Ubuntu 端服务源码备份，已在 Ubuntu 部署 |
-| `启动输入桥.vbs` | 无终端启动 PowerShell 版，推荐立即使用 |
-| `启动输入桥.bat` | 有 EXE 时启动 EXE，否则调用 VBS |
-| `typebridge.ini` | 可选配置，覆盖 Ubuntu IP 和端口 |
-| `typebridge.example.ini` | 配置模板；复制为 `typebridge.ini` 后填写自己的 Ubuntu 地址 |
-| `README.md` | 本说明 |
+| Windows | 键盘钩子不拦截任何按键，Windows 软件正常使用 |
+| Ubuntu | 拦截字符、特殊键和组合键，发送到 Ubuntu，并阻止其进入 Windows |
 
-## 3. 立即使用
+托盘图标和提示文字会显示当前模式和连接状态。
 
-直接双击：
+## 快速开始
 
-```text
-启动输入桥.vbs
+### 1. 准备 Ubuntu
+
+要求：
+
+- Ubuntu 22.04，X11 会话（Wayland 下 xdotool 无法可靠注入按键）
+- 已启用可用的输入法，例如 fcitx + 拼音/搜狗输入法
+- 与 Windows 在同一局域网，或处在同一个 Tailscale tailnet
+
+安装依赖：
+
+```bash
+sudo apt update
+sudo apt install -y python3-gi gir1.2-gtk-3.0 xdotool
 ```
 
-不会出现终端窗口。启动后只在通知区域出现 TypeBridge 托盘图标，并提示当前输入目标。
+安装服务脚本：
 
-托盘操作：
-
-- **双击图标**：切换 Windows / Ubuntu。
-- **右键 → 切换到 Ubuntu / 切换到 Windows**：与快捷键相同。
-- **右键 → 设置 Ubuntu 地址...**：填写**你自己的** Ubuntu IP 和端口，保存后立即重连。
-- **右键 → 退出 TypeBridge**：完全退出并卸载键盘钩子。
-- 图标和提示文字会显示当前目标及连接状态。
-- 重复启动会自动退出第二个实例，避免重复安装键盘钩子或争用快捷键。
-- 第一次运行且没有 `typebridge.ini` 时，程序会自动打开地址设置窗口。
-
-每台 Windows 只连接它自己填写的 Ubuntu，不存在中央服务器，也不会连接到发布者的电脑。
-
-`启动输入桥.bat` 也可使用，但 `cmd` 可能短暂闪现；要完全无终端请用 VBS 或 EXE。
-
-## 4. 编译 EXE
-
-无需安装 Visual Studio、Python 或任何第三方包。Windows 自带 .NET Framework 4.x 即可。
-
-1. 双击 `build.bat`。
-2. 成功后生成 `TypeBridge.exe`。
-3. 双击 `TypeBridge.exe` 使用。
-
-> 如果刚刚修改过 `TypeBridge.cs`，请重新运行 `build.bat`，确保 EXE 使用最新源码。
-
-构建参数使用 `/target:winexe`，因此运行时不创建控制台窗口。
-
-给他人分发时只需复制：
-
-```text
-TypeBridge.exe
-typebridge.ini    （可选）
+```bash
+install -Dm755 typebridge-ubuntu.py ~/.local/bin/typebridge.py
+mkdir -p ~/.config/systemd/user
 ```
 
-目标电脑不需要安装编译环境。
-
-## 5. 全局快捷键与按键边界
-
-### 已支持
-
-| 按键 | Ubuntu 端行为 |
-|---|---|
-| 字母 `a-z` / `A-Z` | 发送字符，供 Ubuntu 输入法组拼音 |
-| 数字 `0-9` | 发送字符，用于候选选择 |
-| 空格 | 发送空格，用于上屏候选 |
-| 常用标点 | 按当前键盘布局转为字符后发送 |
-| 退格 | 发送 `K BackSpace` |
-| 回车 | 发送 `K Return` |
-| 方向键 `↑ ↓ ← →` | 发送 `K Up / Down / Left / Right` |
-| `PageUp` / `PageDown` | 发送 `K Prior / Next` |
-| `Esc` | 发送 `K Escape` |
-| `Tab` | 发送 `K Tab` |
-| `Insert` | 发送 `K Insert` |
-| `Ctrl/Alt/Win + 字母/数字/功能键` | 发送组合键，例如 `K ctrl+a`、`K alt+b`、`K super+e` |
-| `Ctrl + Alt + U` | 仅切换输入目标，不发送 |
-
-Windows 输入法不会参与组词，候选完全由 Ubuntu 输入法负责。
-
-### 组合键转发规则
-
-- Windows 模式下，一切照旧，组合键仍交给 Windows。
-- Ubuntu 模式下，`Ctrl/Alt/Win + 字母/数字/功能键` 会被转发到 Ubuntu，同时阻止其进入 Windows 当前软件。
-- 修饰键本身不会被拦截，因此单独按下 Ctrl、Alt 或 Win 不会误触发 Windows 快捷键。
-- `Ctrl + Alt + U` 永远用于切换输入目标，不会被转发到 Ubuntu。
-
-## 6. 输入模式说明
-
-### Windows 模式
-
-- 全局钩子仍然安装，但 `Enabled=false`，所有按键原样放行。
-- 不读取、不缓存、不记录输入内容。
-- 托盘提示“TypeBridge → Windows”。
-
-### Ubuntu 模式
-
-- 只拦截字符、退格、回车、方向键、PageUp/PageDown、Esc、Tab 和组合键。
-- 拦截的按键不会同时进入 Windows 当前软件。
-- `Ctrl + Alt + U` 仍然用于切换输入目标，不会被转发。
-- 连接断开时，被拦截的字符无法发送；请先看托盘提示是否“未连接”。
-- 托盘提示“TypeBridge → Ubuntu”。
-
-## 7. 配置 Ubuntu 地址
-
-默认只监听本机占位地址 `127.0.0.1`。第一次运行或通过托盘菜单“设置 Ubuntu 地址...”填写你自己的 Ubuntu 地址：
+创建 `~/.config/systemd/user/typebridge.service`：
 
 ```ini
-ip=100.x.y.z        # 你的 Tailscale IP，或局域网 IP / 主机名
+[Unit]
+Description=TypeBridge - Windows to Ubuntu keyboard bridge
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/python3 %h/.local/bin/typebridge.py
+Restart=on-failure
+RestartSec=2
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=%t/gdm/Xauthority
+Environment=GTK_IM_MODULE=fcitx
+Environment=QT_IM_MODULE=fcitx
+Environment=XMODIFIERS=@im=fcitx
+
+[Install]
+WantedBy=graphical-session.target
+```
+
+如果使用 ibus，请把三处 `fcitx` 改为 `ibus`；如果 `XAUTHORITY` 路径不同，按实际会话调整。
+
+启动并检查：
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now typebridge
+systemctl --user status typebridge --no-pager
+```
+
+Ubuntu 端配置保存在 `~/.config/typebridge/config.json`：
+
+```json
+{
+  "port": 4321,
+  "auto_deactivate_fcitx": false
+}
+```
+
+`auto_deactivate_fcitx` 必须为 `false`，否则发送前会关闭 fcitx，拼音无法进入 Ubuntu 输入法。修改配置后重启服务。
+
+如需从局域网访问，放行端口：
+
+```bash
+sudo ufw allow 4321/tcp
+```
+
+> 只应在可信局域网或 Tailscale 内放行。不要把这个端口直接暴露到公网。
+
+获取 Ubuntu 地址：
+
+```bash
+tailscale ip -4
+```
+
+例如输出 `100.x.y.z`。也可以使用局域网 IP 或主机名。
+
+### 2. 配置 Windows
+
+1. 从 [Releases](https://github.com/Ryan119911/TypeBridge/releases/latest) 下载 `TypeBridge.exe`。
+2. 双击运行，不需要安装。
+3. 第一次启动会自动打开设置窗口；填写**你自己的 Ubuntu 地址和端口**并保存。
+4. 也可以右键托盘图标，选择“设置 Ubuntu 地址...”随时修改。
+
+Windows 端配置文件为本机 `typebridge.ini`：
+
+```ini
+ip=100.x.y.z
 port=4321
 ```
 
-局域网直连示例：
+该文件不会提交到 Git 仓库。
 
-```ini
-ip=192.168.1.50
-port=4321
-```
+### 3. 开始输入
 
-也可以直接编辑程序同目录的 `typebridge.ini`，修改后重启或重新保存设置。
+1. 在 Ubuntu 中打开任意可编辑窗口并保持焦点。
+2. 在 Windows 中按 `Ctrl + Alt + U`。
+3. 直接输入拼音，使用数字键或空格选字。
+4. 按 `Ctrl + Alt + U` 切回 Windows。
 
-## 8. Ubuntu 端要求
+程序不会在 Windows 中打开微信输入法进行组词，也不会显示常驻输入窗口。
 
-Ubuntu 继续运行原有 `typebridge.py` 用户服务，监听 `0.0.0.0:4321`。Windows 端协议保持向下兼容：
+## 按键支持
 
-| 行协议（UTF-8、`\n` 结尾） | 含义 |
+| Windows 输入 | Ubuntu 行为 |
 |---|---|
-| `T <JSON字符串>` | 注入文本；引号、反斜杠、换行必须正确 JSON 转义 |
+| 字母、数字、常用标点 | 转为字符发送，交给 Ubuntu 输入法 |
+| 空格 | 发送空格，用于选字上屏 |
+| 退格 | `K BackSpace` |
+| 回车 | `K Return` |
+| 方向键 | `K Up / Down / Left / Right` |
+| PageUp / PageDown | `K Prior / Next` |
+| Esc | `K Escape` |
+| Tab | `K Tab` |
+| Insert | `K Insert` |
+| Ctrl/Alt/Win + 字母、数字、功能键 | `K ctrl+a`、`K alt+b`、`K super+e` 等组合 |
+| `Ctrl + Alt + U` | 仅切换模式，不发送到 Ubuntu |
+
+在 Ubuntu 模式下，被转发的按键不会再进入 Windows 当前软件；单独的 Ctrl、Alt、Win 修饰键不会被拦截。
+
+## 安全说明
+
+TypeBridge 的线路协议是**明文 TCP，没有内置认证或 TLS**。安全边界依赖网络层：
+
+- 推荐只在 Tailscale / WireGuard 等加密私有网络中使用。
+- 或在可信局域网中使用，并通过防火墙限制 4321 端口。
+- **不要**在公网路由器上直接端口转发 4321。
+- 任何能连接 4321 端口的人都能向 Ubuntu 当前焦点窗口注入按键。
+
+Windows 端使用低级键盘钩子：
+
+- 只在 Ubuntu 模式下拦截并转发按键。
+- Windows 模式下所有按键放行，不记录输入内容。
+- 程序不会持久化按键日志。
+- 部分安全软件会把全局键盘钩子标记为敏感行为，这是功能实现所必需的。
+
+## 线路协议
+
+协议为 UTF-8、按行分隔，每行以 `\n` 结尾。
+
+| 行 | 含义 |
+|---|---|
+| `T <JSON字符串>` | 注入文本；JSON 字符串中的引号、反斜杠和换行必须正确转义 |
 | `K BackSpace` | 退格 |
 | `K Return` | 回车 |
 | `K Up / Down / Left / Right` | 方向键 |
 | `K Prior / Next` | PageUp / PageDown |
 | `K Escape / Tab / Insert` | Esc、Tab、Insert |
-| `K ctrl+a` / `K alt+b` / `K super+e` | 组合键，修饰键支持 `ctrl / alt / shift / super` |
+| `K ctrl+a` / `K alt+b` / `K super+e` | 组合键，支持 `ctrl / alt / shift / super` |
 | `PING` | 连通性测试，返回 `PONG` |
 | `QUIT` | 断开连接 |
 
-Ubuntu 端已支持上述键名和组合键；旧客户端只发送 `BackSpace` 与 `Return`，仍然兼容。
+`K` 键名使用白名单校验，未知键名会被拒绝。旧客户端只发送 `BackSpace` 和 `Return` 时仍然兼容。
 
-## 9. 排查
+非 ASCII 的 `T` 文本会由 Ubuntu 端写入剪贴板后粘贴，可能覆盖当前剪贴板内容。
 
-### 托盘图标存在，但快捷键无效
+## 从源码构建
 
-可能 `Ctrl+Alt+U` 被其他软件占用。启动提示会说明；此时右键托盘图标切换。
+### GitHub Actions
 
-### 切到 Ubuntu 后 Windows 仍在输入
+仓库自带 `.github/workflows/build.yml`。每次推送到 `main` 会生成构建产物；推送 `v*` 标签会自动创建 Release 并附带 `TypeBridge.exe`。
 
-检查托盘提示是否为“TypeBridge → Ubuntu”。若仍为 Windows，说明快捷键未触发，使用托盘菜单切换。
+### Windows 本地构建
 
-### 按键没有出现在 Ubuntu
+要求 Windows 自带 .NET Framework 4.x，不需要安装 Visual Studio。
 
-1. 确认 Ubuntu 当前窗口有文本焦点。
-2. 确认托盘显示“已连接”。
-3. 用下面命令测试 PING/PONG：
-
-```powershell
-$server = "100.x.y.z"   # 改成你的 Ubuntu 地址
-$c = New-Object System.Net.Sockets.TcpClient
-$c.ConnectAsync($server, 4321).Wait(1000)
-$s = $c.GetStream()
-$b = [Text.Encoding]::UTF8.GetBytes("PING`n")
-$s.Write($b, 0, $b.Length)
-$s.Flush()
-$buf = New-Object byte[] 16
-$s.ReadTimeout = 1000
-$n = $s.Read($buf, 0, 16)
-[Text.Encoding]::UTF8.GetString($buf, 0, $n)
-$c.Close()
+```text
+双击 build.bat
 ```
 
-预期 `PONG`。
+或手动执行：
 
-### 中文候选没有出现
+```powershell
+& "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" `
+  /nologo /target:winexe /platform:anycpu /optimize+ /codepage:65001 `
+  /out:"TypeBridge.exe" `
+  /reference:System.dll /reference:System.Drawing.dll `
+  /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll `
+  "TypeBridge.cs"
+```
 
-确认 Ubuntu 输入法已启用，并处于中文输入状态。TypeBridge 只负责把拼音按键送到 Ubuntu，候选窗口由 Ubuntu 输入法显示。
+`/target:winexe` 保证运行时不出现控制台窗口。
 
-### PowerShell 版启动时报编码错误
+### PowerShell 备用版
 
-`TypeBridge.ps1` 必须保存为 **UTF-8 with BOM**。当前文件已带 BOM。
+仓库同时保留 `TypeBridge.ps1` 和 `启动输入桥.vbs`，适合不编译 EXE 时直接运行。双击 VBS 可以无终端启动 PowerShell 版；正式分发仍建议使用 EXE。
 
-### 安全软件提示键盘钩子
+## 目录结构
 
-无窗口转发必须使用 Windows 低级键盘钩子。程序只在 Ubuntu 模式拦截字符；Windows 模式全部放行，也不记录按键。若公司安全策略禁止此类钩子，应改用有输入窗口的版本。
+```text
+TypeBridge/
+├─ TypeBridge.cs                 Windows 客户端源码
+├─ TypeBridge.ps1                PowerShell 备用实现
+├─ typebridge-ubuntu.py          Ubuntu 服务端
+├─ build.bat                     本地 EXE 构建脚本
+├─ typebridge.example.ini        Windows 配置模板
+├─ 启动输入桥.vbs                 无终端启动 PowerShell 版
+├─ 启动输入桥.bat                 备用启动器
+├─ .github/workflows/build.yml   GitHub Actions 构建/Release
+└─ README.md
+```
 
-## 10. 验收清单
+`typebridge.ini`、`*.exe`、`__pycache__/` 等本机文件已加入 `.gitignore`。
 
-1. 双击 VBS 后只有托盘图标，没有窗口和常驻终端。
-2. Windows 模式下在各软件中打字正常。
-3. 按 `Ctrl+Alt+U` 后，Windows 本地软件不再收到字母，Ubuntu 收到拼音。
-4. Ubuntu 输入法能显示候选，数字键或空格能选字。
-5. 退格能删除 Ubuntu 中文字符，回车能确认。
-6. 方向键、PageUp/PageDown、Esc、Tab 能在 Ubuntu 正常生效。
-7. `Ctrl+A`、`Alt+B`、`Win+E` 等组合键能转发到 Ubuntu，且不再触发 Windows 本地快捷键。
-8. 再按快捷键后，Windows 输入立即恢复。
-9. 托盘退出后，快捷键与键盘钩子完全失效。
+## 常见问题
+
+### 托盘显示未连接
+
+检查 Ubuntu 服务是否运行：
+
+```bash
+systemctl --user status typebridge --no-pager
+```
+
+检查端口和网络：
+
+```bash
+ss -lntp | grep 4321
+tailscale status
+```
+
+Windows 端设置里确认 IP 和端口正确，并确认 Ubuntu 防火墙允许该端口。
+
+### 连接成功但按键没有出现
+
+确认 Ubuntu 当前窗口有文本焦点，且是 X11 会话。Wayland 下 xdotool 可能不生效。
+
+### 中文没有候选窗口
+
+确认 Ubuntu 输入法已启用，并且 `~/.config/typebridge/config.json` 中：
+
+```json
+"auto_deactivate_fcitx": false
+```
+
+修改后重启：
+
+```bash
+systemctl --user restart typebridge
+```
+
+### Ctrl+Alt+U 无反应
+
+快捷键可能被其他软件占用。右键托盘图标选择模式切换；如果仍然无效，检查安全软件是否拦截了全局键盘钩子。
+
+### 启动 EXE 后只有托盘，没有主窗口
+
+这是预期行为。TypeBridge 没有常驻输入窗口；设置窗口只在首次运行或手动打开设置时出现。
+
+### PowerShell 版报编码错误
+
+`TypeBridge.ps1` 必须保存为 UTF-8 with BOM。仓库当前文件已带 BOM。
+
+## 已知限制
+
+- 仅支持 X11；Wayland 原生会话未验证。
+- 不传输画面，不控制鼠标，不支持远程桌面场景。
+- 依赖 Ubuntu 输入法本身；TypeBridge 不提供候选词界面。
+- 目标程序必须能接收 X11 键盘事件；部分全屏游戏或使用原始输入的程序可能不兼容。
+- 明文 TCP 协议，必须配合 Tailscale、可信局域网和防火墙使用。
+- `Ctrl + Alt + U` 为保留快捷键，不转发到 Ubuntu。
