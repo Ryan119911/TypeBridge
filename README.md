@@ -18,6 +18,7 @@ TypeBridge 是一个无窗口、托盘常驻的 Windows 输入桥。它只转发
 
 - **无输入窗口**：启动后只常驻系统托盘，不打断正常 Windows 输入。
 - **全局切换**：在任何软件中按 `Ctrl + Alt + U`，在 Windows 输入和 Ubuntu 输入之间切换。
+- **即时状态提示**：复用单条非激活浮层，连续切换时立即刷新，不会像系统气泡那样排队延迟。
 - **Ubuntu 输入法选字**：拼音字母、数字、空格发往 Ubuntu，候选窗口由 Ubuntu 输入法显示。
 - **发送后不堆字**：Ubuntu 模式下的按键不会同时进入 Windows 当前软件。
 - **特殊按键**：方向键、PageUp/PageDown、Esc、Tab、Insert。
