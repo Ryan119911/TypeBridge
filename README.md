@@ -4,7 +4,7 @@
 
 **在 Windows 上直接打字，把键盘输入实时发送到 Ubuntu 当前焦点窗口。**
 
-TypeBridge 是一个无窗口、托盘常驻的 Windows 输入桥。它只转发键盘输入，不传画面、不控制鼠标。中文不在 Windows 端提交，而是把拼音和候选选择键送到 Ubuntu，由 **Ubuntu 输入法**完成组词和选字。
+TypeBridge 是一个无窗口、托盘常驻的 Windows 输入桥。它转发键盘和鼠标输入，不传画面。中文不在 Windows 端提交，而是把拼音和候选选择键送到 Ubuntu，由 **Ubuntu 输入法**完成组词和选字。
 
 [![Build TypeBridge](https://github.com/Ryan119911/TypeBridge/actions/workflows/build.yml/badge.svg)](https://github.com/Ryan119911/TypeBridge/actions/workflows/build.yml)
 [![Latest release](https://img.shields.io/github/v/release/Ryan119911/TypeBridge)](https://github.com/Ryan119911/TypeBridge/releases)
@@ -29,6 +29,7 @@ Ubuntu 安装包会创建应用菜单入口和开机自启的 systemd 用户服�
 - **发送后不堆字**：Ubuntu 模式下的按键不会同时进入 Windows 当前软件。
 - **特殊按键**：方向键、PageUp/PageDown、Esc、Tab、Insert。
 - **全键盘转发**：独立 Ctrl/Shift/Alt/Win、F1–F24、CapsLock/NumLock、小键盘、PrintScreen 和媒体键。
+- **鼠标转发**：Ubuntu 模式下一并接管鼠标，移动、左/中/右键、侧键、滚轮都送到 Ubuntu（见「鼠标支持」）。
 - **组合键**：Ctrl/Alt/Win + 字母、数字、功能键，例如 `Ctrl+A`、`Alt+B`、`Win+E`。
 - **独立配置**：首次运行填入自己的 Ubuntu IP 和端口，保存在本地 `typebridge.ini`。
 - **低依赖**：Windows 端使用系统自带 .NET Framework；Ubuntu 端只需要 Python 3、GTK、xdotool 和可用的 X11 输入法。
@@ -44,7 +45,7 @@ Ubuntu 安装包会创建应用菜单入口和开机自启的 systemd 用户服�
 │  TypeBridge.exe              │
 │    ├─ 托盘图标 / 设置窗口     │
 │    ├─ Ctrl+Alt+U 模式切换    │
-│    └─ 低级键盘钩子            │
+│    └─ 低级键盘/鼠标钩子        │
 └──────────────┬───────────────┘
                │ TCP 4321
                │ Tailscale / 局域网
@@ -221,6 +222,27 @@ port=4321
 
 在 Ubuntu 模式下，所有被转发的按键都不会再进入 Windows 当前软件；单独的 Ctrl、Alt、Win 也会在松开时发送到 Ubuntu。
 
+## 鼠标支持
+
+Ubuntu 模式下鼠标一并接管：移动指针、点击、拖拽、滚轮都会送到 Ubuntu 当前指针位置，Windows 本机不再响应。按 `Ctrl + Alt + U` 切回 Windows 后鼠标立刻恢复正常。
+
+| Windows 动作 | Ubuntu 行为 |
+|---|---|
+| 移动鼠标 | `M dx dy` → `xdotool mousemove_relative`（相对位移，与分辨率无关） |
+| 左键 / 中键 / 右键 | `B 1/2/3 down\|up` → `mousedown` / `mouseup`，按下与松开分离所以支持拖拽 |
+| 侧键（后退 / 前进） | `B 8/9` |
+| 滚轮上下 | `W up / down` → `xdotool click 4/5` |
+| 滚轮左右 | `W left / right` → `xdotool click 6/7` |
+
+实现要点：
+
+- 客户端每 16ms 合并一次位移（约 60Hz），避免高频鼠标事件把每个像素都发成一个 TCP 包。
+- 光标在接管期间被钉在屏幕中心，因此拖到屏幕边缘也不会丢位移；系统不会把指针"夹"在边上。
+- 位移按屏幕物理像素 1:1 转发；进程启动时声明 DPI 感知，保证钩子坐标与光标坐标同一坐标系。
+- 切回 Windows 时会把仍按下的键补发为 `up`，避免 Ubuntu 卡在拖拽状态。
+- **断线自动放行**：连接断开时钩子不再拦截鼠标，本机鼠标立即恢复，不会把用户锁死。
+- 单次位移上限 ±2000px，防止异常事件把指针甩飞。
+
 ## 安全说明
 
 TypeBridge 的线路协议是**明文 TCP，没有内置认证或 TLS**。安全边界依赖网络层：
@@ -228,9 +250,9 @@ TypeBridge 的线路协议是**明文 TCP，没有内置认证或 TLS**。安全
 - 推荐只在 Tailscale / WireGuard 等加密私有网络中使用。
 - 或在可信局域网中使用，并通过防火墙限制 4321 端口。
 - **不要**在公网路由器上直接端口转发 4321。
-- 任何能连接 4321 端口的人都能向 Ubuntu 当前焦点窗口注入按键。
+- 任何能连接 4321 端口的人都能向 Ubuntu 当前焦点窗口注入按键，**也能移动指针和点击**。
 
-Windows 端使用低级键盘钩子：
+Windows 端使用低级键盘与鼠标钩子：
 
 - 只在 Ubuntu 模式下拦截并转发按键。
 - Windows 模式下所有按键放行，不记录输入内容。
@@ -257,10 +279,13 @@ Windows 端使用低级键盘钩子：
 | `K KP_0` … `K KP_9` | 小键盘数字，映射为普通数字，避免改变 NumLock |
 | `K VolumeUp / VolumeDown / VolumeMute` | 音量键 |
 | `K ctrl+a` / `K alt+b` / `K super+e` | 组合键，支持 `ctrl / alt / shift / super` |
+| `M <dx> <dy>` | 相对移动指针，单位为像素，可为负；单次上限 ±2000 |
+| `B <按钮> down\|up` | 按下/松开鼠标按钮，1 左 2 中 3 右 8 后退 9 前进 |
+| `W up / down / left / right` | 滚轮上下左右，对应 X11 按钮 4/5/6/7 |
 | `PING` | 连通性测试，返回 `PONG` |
 | `QUIT` | 断开连接 |
 
-`K` 键名使用白名单校验，未知键名会被拒绝。旧客户端只发送 `BackSpace` 和 `Return` 时仍然兼容。
+`K` 键名和 `B` 按钮编号都使用白名单校验，未知值会被拒绝并记录日志。旧客户端只发送 `BackSpace` 和 `Return` 时仍然兼容。
 
 非 ASCII 的 `T` 文本会由 Ubuntu 端写入剪贴板后粘贴，可能覆盖当前剪贴板内容。
 
@@ -387,7 +412,8 @@ systemctl --user restart typebridge
 ## 已知限制
 
 - 仅支持 X11；Wayland 原生会话未验证。
-- 不传输画面，不控制鼠标，不支持远程桌面场景。
+- 不传输画面，不支持远程桌面场景。
+- 鼠标按相对位移转发，两端分辨率或缩放不同也能用；但没有绝对坐标定位，无法把指针"跳"到 Ubuntu 的某个固定位置。
 - 依赖 Ubuntu 输入法本身；TypeBridge 不提供候选词界面。
 - 部分全屏游戏或使用原始输入的程序可能不兼容。
 - `Ctrl + Alt + Delete` 等 Windows 安全注意序列由操作系统保留，无法转发。
