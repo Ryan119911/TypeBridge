@@ -431,6 +431,8 @@ namespace TypeBridgeApp
             ShowInTaskbar = false;
             TopMost = true;
             StartPosition = FormStartPosition.Manual;
+            AutoScaleDimensions = new SizeF(96F, 96F);
+            AutoScaleMode = AutoScaleMode.Dpi;
             ClientSize = new Size(380, 84);
             BackColor = Color.FromArgb(30, 30, 30);
             Opacity = 0.96;
@@ -1260,6 +1262,10 @@ namespace TypeBridgeApp
             MinimizeBox = false;
             ShowInTaskbar = false;
             TopMost = true;
+            // 代码创建的窗体默认不做 DPI 缩放；显式声明 96 DPI 基准后，
+            // 高缩放屏幕上控件和文字才会按比例放大，避免文字被截断。
+            AutoScaleDimensions = new SizeF(96F, 96F);
+            AutoScaleMode = AutoScaleMode.Dpi;
             ClientSize = new Size(460, 410);
 
             Label hostLabel = new Label();
