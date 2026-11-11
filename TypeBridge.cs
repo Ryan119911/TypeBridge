@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.5.1.0")]
+[assembly: AssemblyVersion("3.5.2.0")]
 
 namespace TypeBridgeApp
 {
@@ -2193,6 +2193,10 @@ namespace TypeBridgeApp
         private readonly Timer clipboardTimer = new Timer();
         private string lastLocalClip;
         private string lastRemoteClip;
+        // 图片走文件通道（CLIPIMG）传输，用 PNG 的 MD5 做去重指纹
+        private string lastLocalImageKey;
+        private bool suppressImageEcho;
+        private int imageSending;
         private System.Threading.Thread readerThread;
         private volatile bool readerRunning;
 
@@ -2270,8 +2274,24 @@ namespace TypeBridgeApp
             clipboardTimer.Interval = 600;
             clipboardTimer.Tick += delegate { PollClipboard(); };
             // 启动时把现有剪贴板当作基线，否则一连上就会把旧内容推给 Ubuntu
-            try { lastLocalClip = Clipboard.ContainsText() ? Clipboard.GetText() : string.Empty; }
-            catch { lastLocalClip = string.Empty; }
+            try
+            {
+                if (Clipboard.ContainsText())
+                {
+                    lastLocalClip = Clipboard.GetText();
+                }
+                else
+                {
+                    lastLocalClip = string.Empty;
+                    byte[] baseline = ClipboardImageToPng();
+                    if (baseline != null)
+                        lastLocalImageKey = ImageKey(baseline);
+                }
+            }
+            catch
+            {
+                lastLocalClip = string.Empty;
+            }
             clipboardTimer.Start();
 
             ApplyHotkeys();
@@ -2800,13 +2820,39 @@ namespace TypeBridgeApp
             if (stream == null || disposed)
                 return;
 
-            string text;
+            string text = string.Empty;
+            byte[] image = null;
             try
             {
-                text = Clipboard.ContainsText() ? Clipboard.GetText() : string.Empty;
+                // 有文本时优先文本：Excel/Word 复制区域会同时带位图，
+                // 传图过去反而粘不出可编辑的内容。
+                if (Clipboard.ContainsText())
+                    text = Clipboard.GetText();
+                else if (Clipboard.ContainsImage())
+                    image = ClipboardImageToPng();
             }
             catch
             {
+                return;
+            }
+
+            if (image != null)
+            {
+                string key = ImageKey(image);
+                if (suppressImageEcho)
+                {
+                    // 刚由 Ubuntu 写进来的图片，回读后重新编码的 PNG 与原图不同，
+                    // 直接记下指纹并放行，否则会来回推成死循环。
+                    suppressImageEcho = false;
+                    lastLocalImageKey = key;
+                    return;
+                }
+                if (key == lastLocalImageKey)
+                    return;
+                lastLocalImageKey = key;
+                lastLocalClip = string.Empty;
+                Log.Write("clipboard image -> ubuntu (" + image.Length + " bytes)");
+                System.Threading.ThreadPool.QueueUserWorkItem(delegate { UploadClipboardImage(image); });
                 return;
             }
 
@@ -2815,7 +2861,77 @@ namespace TypeBridgeApp
             lastLocalClip = text;
             if (text.Length == 0 || text == lastRemoteClip)
                 return;
+            lastLocalImageKey = null;
             SendLine("C " + json.Serialize(text));
+        }
+
+        private static byte[] ClipboardImageToPng()
+        {
+            using (Image image = Clipboard.GetImage())
+            {
+                if (image == null)
+                    return null;
+                using (MemoryStream buffer = new MemoryStream())
+                {
+                    image.Save(buffer, System.Drawing.Imaging.ImageFormat.Png);
+                    return buffer.ToArray();
+                }
+            }
+        }
+
+        private static string ImageKey(byte[] png)
+        {
+            using (System.Security.Cryptography.MD5 md5 = System.Security.Cryptography.MD5.Create())
+            {
+                byte[] hash = md5.ComputeHash(png);
+                StringBuilder text = new StringBuilder(hash.Length * 2);
+                for (int i = 0; i < hash.Length; i++)
+                    text.Append(hash[i].ToString("x2"));
+                return text.ToString();
+            }
+        }
+
+        /// <summary>把剪贴板图片按 CLIPIMG 协议推给 Ubuntu 的文件端口，不落盘。</summary>
+        private void UploadClipboardImage(byte[] png)
+        {
+            if (png == null || png.Length == 0)
+                return;
+            if (System.Threading.Interlocked.CompareExchange(ref imageSending, 1, 0) != 0)
+                return;   // 上一张还在传，这张直接跳过，避免堆积
+
+            TcpClient socket = null;
+            try
+            {
+                socket = new TcpClient();
+                socket.NoDelay = true;
+                if (!socket.ConnectAsync(ip, filePort).Wait(4000))
+                {
+                    Log.Write("clipboard image: 连不上文件端口 " + filePort);
+                    return;
+                }
+
+                NetworkStream target = socket.GetStream();
+                byte[] head = Encoding.UTF8.GetBytes("CLIPIMG " + png.Length + " clip.png\n");
+                target.Write(head, 0, head.Length);
+                target.Write(png, 0, png.Length);
+                target.Flush();
+
+                string reply = ReadReply(socket);
+                Log.Write("clipboard image -> ubuntu: " + (reply ?? "(no reply)"));
+            }
+            catch (Exception ex)
+            {
+                Log.Write("clipboard image upload failed: " + ex.Message);
+            }
+            finally
+            {
+                if (socket != null)
+                {
+                    try { socket.Close(); }
+                    catch { }
+                }
+                System.Threading.Interlocked.Exchange(ref imageSending, 0);
+            }
         }
 
         private void ApplyRemoteClipboard(string text)
@@ -2824,8 +2940,34 @@ namespace TypeBridgeApp
                 return;
             lastRemoteClip = text;
             lastLocalClip = text;
+            lastLocalImageKey = null;
             try { Clipboard.SetText(text); }
             catch { }
+        }
+
+        private void ApplyRemoteClipboardImage(byte[] png)
+        {
+            if (png == null || png.Length == 0)
+                return;
+            try
+            {
+                Image image = null;
+                using (MemoryStream buffer = new MemoryStream(png))
+                {
+                    using (Image loaded = Image.FromStream(buffer))
+                        image = new Bitmap(loaded);
+                }
+                Clipboard.SetImage(image);
+                suppressImageEcho = true;
+                lastLocalImageKey = null;
+                lastLocalClip = string.Empty;
+                lastRemoteClip = string.Empty;
+                Log.Write("clipboard <- ubuntu image (" + png.Length + " bytes)");
+            }
+            catch (Exception ex)
+            {
+                Log.Write("set clipboard image failed: " + ex.Message);
+            }
         }
 
         // ---------- 服务端下行消息 ----------
@@ -3049,7 +3191,8 @@ namespace TypeBridgeApp
 
                 string header = ReadAsciiLine(source);
                 string[] parts = header.Split(new char[] { ' ' }, 3);
-                if (parts.Length != 3 || parts[0] != "UPLOAD")
+                bool clipImage = parts.Length == 3 && parts[0] == "CLIPIMG";
+                if (parts.Length != 3 || (parts[0] != "UPLOAD" && !clipImage))
                 {
                     SendAscii(source, "ERR bad header");
                     return;
@@ -3059,6 +3202,39 @@ namespace TypeBridgeApp
                 if (!long.TryParse(parts[1], out size) || size < 0)
                 {
                     SendAscii(source, "ERR bad size");
+                    return;
+                }
+
+                if (clipImage)
+                {
+                    // 剪贴板图片：读进内存直接上剪贴板，不落盘
+                    byte[] png;
+                    using (MemoryStream buffer = new MemoryStream())
+                    {
+                        long remainingImage = size;
+                        byte[] chunk = new byte[65536];
+                        while (remainingImage > 0)
+                        {
+                            int count = source.Read(chunk, 0, (int)Math.Min(chunk.Length, remainingImage));
+                            if (count <= 0)
+                                break;
+                            buffer.Write(chunk, 0, count);
+                            remainingImage -= count;
+                        }
+                        if (remainingImage != 0)
+                        {
+                            SendAscii(source, "ERR incomplete");
+                            return;
+                        }
+                        png = buffer.ToArray();
+                    }
+
+                    try
+                    {
+                        hotkeyForm.BeginInvoke(new Action(delegate { ApplyRemoteClipboardImage(png); }));
+                    }
+                    catch { }
+                    SendAscii(source, "OK clipboard");
                     return;
                 }
 

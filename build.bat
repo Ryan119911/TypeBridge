@@ -27,10 +27,15 @@ rem ---- 图标可能在同级 assets，也可能在上一级（本地 src 目�
 set "ICON=%~dp0assets\typebridge.ico"
 if not exist "%ICON%" set "ICON=%~dp0..\assets\typebridge.ico"
 
-echo 正在编译 TypeBridge.exe ...
+rem ---- output path: default overwrite TypeBridge.exe in this dir.
+rem      Pass one argument to build somewhere else (verify while the app is running).
+set "OUT=%~dp0TypeBridge.exe"
+if not "%~1"=="" set "OUT=%~1"
+
+echo 正在编译 %OUT% ...
 "%CSC%" /nologo /target:winexe /platform:anycpu /optimize+ /codepage:65001 ^
     /win32icon:"%ICON%" ^
-    /out:"%~dp0TypeBridge.exe" ^
+    /out:"%OUT%" ^
     /reference:System.dll ^
     /reference:System.Drawing.dll ^
     /reference:System.Windows.Forms.dll ^
@@ -46,5 +51,5 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo 编译成功：%~dp0TypeBridge.exe
+echo 编译成功：%OUT%
 pause

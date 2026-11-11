@@ -13,6 +13,11 @@ TypeBridge Ubuntu 端守护进程（单线程 GLib 事件循环版）
   W up|down|left|right  滚轮
   PING              应答 PONG
   QUIT              断开
+  C <json字符串>    写本机剪贴板（文本，Windows -> Ubuntu）
+
+文件通道（默认 4322/4323，独立连接，一行头 + 原始字节）:
+  UPLOAD <字节数> <文件名>   收文件并落盘
+  CLIPIMG <字节数> <文件名>  收图片直接写剪贴板（图片同步，双向都用它）
 
 注入策略:
   ASCII            -> xdotool type（真实按键）
@@ -83,7 +88,7 @@ _early_pick_display()
 
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Gdk, GLib
+from gi.repository import Gtk, Gdk, GLib, GdkPixbuf
 
 
 
@@ -582,10 +587,18 @@ def pointer_move_abs(payload):
         xdo("mousemove", str(x), str(y))
 
 
-# ---------- 剪贴板单向同步（文本） ----------
+# ---------- 剪贴板双向同步（文本 + 图片） ----------
 
 _clipboard = None
-_clipboard_state = {"applied": "", "sent": "", "primed": False}
+_clipboard_state = {
+    "applied": "",          # 刚由 Windows 写进来的文本
+    "sent": "",             # 刚推给 Windows 的文本
+    "primed": False,        # 启动基线：避免一连上就把旧内容推给对端
+    "image_applied": None,  # 刚由 Windows 写进来的图片（PNG 字节）
+    "image_sent": None,     # 刚推给 Windows 的图片（PNG 字节）
+    "suppress_image": False,
+}
+_seq = {"clip": 0}
 
 
 def broadcast(line):
@@ -611,7 +624,101 @@ def set_clipboard(text):
         log("clipboard set failed: %r" % (e,))
 
 
+def set_clipboard_image(data):
+    """Windows -> Ubuntu：把 PNG 字节写进本机剪贴板（必须在主循环线程里调用）。"""
+    if not data:
+        return
+    _clipboard_state["image_applied"] = data
+    # 自己成为剪贴板 owner 后 GTK 会再发一次 owner-change，回读出来重新编码的
+    # PNG 跟原图不一定逐字节相同，所以这里用标志把回声拦掉。
+    _clipboard_state["suppress_image"] = True
+    try:
+        loader = GdkPixbuf.PixbufLoader()
+        loader.write(data)
+        loader.close()
+        pixbuf = loader.get_pixbuf()
+    except Exception as e:
+        log("clipboard image decode failed: %r" % (e,))
+        return
+    if pixbuf is None:
+        log("clipboard image decode failed: empty pixbuf")
+        return
+    try:
+        cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        cb.set_image(pixbuf)
+        cb.store()
+        log("clipboard <- windows image (%dx%d, %d bytes)"
+            % (pixbuf.get_width(), pixbuf.get_height(), len(data)))
+    except Exception as e:
+        log("clipboard image set failed: %r" % (e,))
+
+
+def push_clipboard_image(data):
+    """Ubuntu -> Windows：走文件通道把 PNG 推过去，由 Windows 端写进剪贴板。"""
+    if not data:
+        return
+    peer = LAST_PEER["addr"]
+    if not peer:
+        log("clipboard image: 还没有 Windows 连进来")
+        return
+    port = int(CONF.get("file_recv_port", 4323))
+    sock = None
+    try:
+        sock = socket.create_connection((peer, port), 5)
+        sock.sendall(("CLIPIMG %d clip.png\n" % len(data)).encode("utf-8"))
+        sock.sendall(data)
+        reply = sock.makefile("rb").readline(4096).decode("utf-8", "replace").strip()
+        log("clipboard image -> windows: %s" % (reply or "(no reply)"))
+    except Exception as e:
+        log("clipboard image push failed: %r" % (e,))
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+def _clipboard_image_seen(pixbuf):
+    try:
+        ok, data = pixbuf.save_to_bufferv("png", [], [])
+    except Exception as e:
+        log("clipboard image encode failed: %r" % (e,))
+        return
+    if not ok or not data:
+        return
+    if _clipboard_state["suppress_image"]:
+        _clipboard_state["suppress_image"] = False
+        _clipboard_state["image_sent"] = data
+        return
+    if not _clipboard_state["primed"]:
+        _clipboard_state["primed"] = True
+        _clipboard_state["image_sent"] = data
+        return
+    if data == _clipboard_state["image_sent"] or data == _clipboard_state["image_applied"]:
+        return
+    _clipboard_state["image_sent"] = data
+    log("clipboard image -> windows (%d bytes)" % len(data))
+    threading.Thread(target=push_clipboard_image, args=(data,), daemon=True).start()
+
+
+def _clipboard_image_ready(clipboard, pixbuf, seq):
+    if seq != _seq["clip"]:
+        return
+    if pixbuf is not None:
+        _clipboard_image_seen(pixbuf)
+        return
+    # 这次复制不是图片，退回文本
+    try:
+        clipboard.request_text(_clipboard_text_ready, seq)
+    except Exception as e:
+        log("clipboard request failed: %r" % (e,))
+
+
 def _clipboard_text_ready(clipboard, text, user_data):
+    seq = user_data
+    if seq is not None and seq != _seq["clip"]:
+        return
     if not text:
         return
     if not _clipboard_state["primed"]:
@@ -622,15 +729,24 @@ def _clipboard_text_ready(clipboard, text, user_data):
     if text == _clipboard_state["applied"] or text == _clipboard_state["sent"]:
         return
     _clipboard_state["sent"] = text
+    _clipboard_state["image_sent"] = None
     log("clipboard -> windows (%d chars)" % len(text))
     broadcast("C " + json.dumps(text))
 
 
 def _on_clipboard_owner_change(clipboard, event, user_data=None):
+    _seq["clip"] += 1
+    seq = _seq["clip"]
+    # 先问图片：浏览器/截图复制出来的内容常常同时带文本和位图，
+    # 图片优先才符合"复制了张图"的直觉。
     try:
-        clipboard.request_text(_clipboard_text_ready, None)
+        clipboard.request_image(_clipboard_image_ready, seq)
     except Exception as e:
-        log("clipboard request failed: %r" % (e,))
+        log("clipboard image request failed: %r" % (e,))
+        try:
+            clipboard.request_text(_clipboard_text_ready, seq)
+        except Exception:
+            pass
 
 
 def watch_clipboard():
@@ -639,8 +755,8 @@ def watch_clipboard():
         _clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         _clipboard.connect("owner-change", _on_clipboard_owner_change)
         # 先取一次当前内容当基线，之后只在真正变化时才推送
-        _clipboard.request_text(_clipboard_text_ready, None)
-        log("clipboard watch enabled")
+        _clipboard.request_image(_clipboard_image_ready, _seq["clip"])
+        log("clipboard watch enabled (text + image)")
     except Exception as e:
         _clipboard = None
         log("clipboard watch failed: %r" % (e,))
@@ -848,7 +964,7 @@ def handle_upload(conn, addr):
         stream = conn.makefile("rb")
         header = stream.readline(4096).decode("utf-8", "replace").strip()
         parts = header.split(" ", 2)
-        if len(parts) != 3 or parts[0] != "UPLOAD":
+        if len(parts) != 3 or parts[0] not in ("UPLOAD", "CLIPIMG"):
             log("file: bad header %r from %s" % (header[:60], addr[0]))
             conn.sendall(b"ERR bad header\n")
             return
@@ -859,6 +975,23 @@ def handle_upload(conn, addr):
             return
         if size < 0:
             conn.sendall(b"ERR bad size\n")
+            return
+
+        if parts[0] == "CLIPIMG":
+            # 剪贴板图片：只进内存，不落盘
+            data = bytearray()
+            while len(data) < size:
+                chunk = stream.read(min(1 << 16, size - len(data)))
+                if not chunk:
+                    break
+                data += chunk
+            if len(data) != size:
+                log("clipboard image: incomplete (%d/%d) from %s" % (len(data), size, addr[0]))
+                conn.sendall(b"ERR incomplete\n")
+                return
+            # GTK 剪贴板只能在主循环线程里操作，这里排队过去
+            GLib.idle_add(set_clipboard_image, bytes(data))
+            conn.sendall(b"OK clipboard\n")
             return
 
         name = safe_name(parts[2])
