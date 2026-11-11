@@ -18,7 +18,7 @@ TypeBridge Ubuntu 端守护进程（单线程 GLib 事件循环版）
 
 文件通道（默认 4322/4323，独立连接，一行头 + 原始字节）:
   UPLOAD <字节数> <文件名>   收文件并落盘
-  CLIPIMG <字节数> <文件名>  收图片直接写剪贴板（图片同步，双向都用它）
+  CLIPIMG <图片字节数> <文本字节数>  收图片（可带一段文本）直接写剪贴板
 
 注入策略:
   ASCII            -> xdotool type（真实按键）
@@ -26,6 +26,7 @@ TypeBridge Ubuntu 端守护进程（单线程 GLib 事件循环版）
   粘贴键按窗口类选择, 可用 ~/.config/typebridge/routes.json 覆盖:
       {"窗口类名小写": "ctrl_v" | "ctrl_shift_v" | "shift_insert" | "type"}
 """
+import ctypes
 import faulthandler
 import json
 import os
@@ -629,11 +630,106 @@ def set_clipboard(text):
         log("clipboard set failed: %r" % (e,))
 
 
-def set_clipboard_image(data):
-    """Windows -> Ubuntu：把 PNG 字节写进本机剪贴板（必须在主循环线程里调用）。"""
+class _GtkTargetEntry(ctypes.Structure):
+    _fields_ = [("target", ctypes.c_char_p),
+                ("flags", ctypes.c_uint),
+                ("info", ctypes.c_uint)]
+
+
+_GET_FUNC = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p,
+                             ctypes.c_uint, ctypes.c_void_p)
+_CLEAR_FUNC = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)
+_clip_c = {"ready": False}
+
+
+def _init_clip_c():
+    """PyGObject 没暴露 Gtk.Clipboard.set_with_data（回调要 GClosure），
+    这里直接怼 libgtk-3 的 C 接口，才能一次挂上"图片 + 文本"两个目标。"""
+    if _clip_c.get("ready"):
+        return True
+    try:
+        gtk = ctypes.CDLL("libgtk-3.so.0")
+        gdk = ctypes.CDLL("libgdk-3.so.0")
+
+        gdk.gdk_atom_intern.restype = ctypes.c_void_p
+        gdk.gdk_atom_intern.argtypes = [ctypes.c_char_p, ctypes.c_int]
+
+        gtk.gtk_clipboard_get.restype = ctypes.c_void_p
+        gtk.gtk_clipboard_get.argtypes = [ctypes.c_void_p]
+
+        gtk.gtk_clipboard_set_with_data.restype = ctypes.c_int
+        gtk.gtk_clipboard_set_with_data.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(_GtkTargetEntry), ctypes.c_uint,
+            _GET_FUNC, _CLEAR_FUNC, ctypes.c_void_p]
+
+        gtk.gtk_selection_data_set.restype = ctypes.c_int
+        gtk.gtk_selection_data_set.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+
+        gtk.gtk_selection_data_set_text.restype = ctypes.c_int
+        gtk.gtk_selection_data_set_text.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+
+        _clip_c.update(gtk=gtk, gdk=gdk, ready=True)
+        return True
+    except Exception as e:
+        log("clipboard: 双格式初始化失败 %r" % (e,))
+        return False
+
+
+def _own_image_and_text(png, text):
+    """把 image/png 和文本同时放进 CLIPBOARD：粘到图片程序里是图，粘到输入框里是字。"""
+    if not _init_clip_c():
+        return False
+    gtk = _clip_c["gtk"]
+    gdk = _clip_c["gdk"]
+    try:
+        clip = gtk.gtk_clipboard_get(gdk.gdk_atom_intern(b"CLIPBOARD", False))
+        if not clip:
+            return False
+        atom_png = gdk.gdk_atom_intern(b"image/png", False)
+
+        entries = (_GtkTargetEntry * 3)(
+            _GtkTargetEntry(b"image/png", 0, 0),
+            _GtkTargetEntry(b"text/plain;charset=utf-8", 0, 1),
+            _GtkTargetEntry(b"UTF8_STRING", 0, 1),
+        )
+        png_buffer = ctypes.create_string_buffer(bytes(png), len(png))
+        text_buffer = ctypes.create_string_buffer(text.encode("utf-8"))
+        png_pointer = ctypes.cast(png_buffer, ctypes.c_char_p)
+        text_pointer = ctypes.cast(text_buffer, ctypes.c_char_p)
+
+        def provide(_clip, selection_data, info, _user_data):
+            try:
+                if info == 0:
+                    gtk.gtk_selection_data_set(selection_data, atom_png, 8,
+                                               png_pointer, len(png))
+                else:
+                    gtk.gtk_selection_data_set_text(selection_data, text_pointer, -1)
+            except Exception as exc:
+                log("clipboard provide failed: %r" % (exc,))
+
+        provide_c = _GET_FUNC(provide)
+        clear_c = _CLEAR_FUNC(lambda *_: None)
+
+        ok = gtk.gtk_clipboard_set_with_data(clip, entries, 3, provide_c, clear_c, None)
+        if not ok:
+            return False
+        # 这些对象必须一直活着，否则回调指针悬空会让 GTK 崩
+        _clip_c["keep"] = (entries, png_buffer, text_buffer, provide_c, clear_c, provide)
+        return True
+    except Exception as e:
+        log("clipboard: 双格式设置失败 %r" % (e,))
+        return False
+
+
+def set_clipboard_image(data, text=None):
+    """Windows -> Ubuntu：把图片（可带文本）写进本机剪贴板（必须在主循环线程里调用）。"""
     if not data:
         return
     _clipboard_state["image_applied"] = data
+    if text:
+        _clipboard_state["applied"] = text
     # 自己成为剪贴板 owner 后 GTK 会再发一次 owner-change，回读出来重新编码的
     # PNG 跟原图不一定逐字节相同，所以这里用标志把回声拦掉。
     _clipboard_state["suppress_image"] = True
@@ -650,10 +746,19 @@ def set_clipboard_image(data):
         return
     try:
         cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-        cb.set_image(pixbuf)
-        cb.store()
-        log("clipboard <- windows image (%dx%d, %d bytes)"
-            % (pixbuf.get_width(), pixbuf.get_height(), len(data)))
+        if text:
+            if not _own_image_and_text(data, text):
+                # 双格式挂不上就退回纯文本：宁可文字能粘，
+                # 也不要让剪贴板变成一个什么都粘不出来的状态
+                cb.set_text(text, -1)
+                cb.store()
+                log("clipboard: 双格式不可用，退回纯文本")
+                return
+        else:
+            cb.set_image(pixbuf)
+            cb.store()
+        log("clipboard <- windows image (%dx%d, %d bytes, text %d chars)"
+            % (pixbuf.get_width(), pixbuf.get_height(), len(data), len(text or "")))
     except Exception as e:
         log("clipboard image set failed: %r" % (e,))
 
@@ -670,7 +775,7 @@ def push_clipboard_image(data):
     sock = None
     try:
         sock = socket.create_connection((peer, port), 5)
-        sock.sendall(("CLIPIMG %d clip.png\n" % len(data)).encode("utf-8"))
+        sock.sendall(("CLIPIMG %d 0\n" % len(data)).encode("utf-8"))
         sock.sendall(data)
         reply = sock.makefile("rb").readline(4096).decode("utf-8", "replace").strip()
         log("clipboard image -> windows: %s" % (reply or "(no reply)"))
@@ -1142,7 +1247,15 @@ def handle_upload(conn, addr):
             return
 
         if parts[0] == "CLIPIMG":
-            # 剪贴板图片：只进内存，不落盘
+            # 剪贴板图片：只进内存，不落盘。
+            # 第三段是可选文本长度；旧版客户端这里放的是文件名，解析失败按 0 处理。
+            try:
+                caption_len = int(parts[2])
+            except ValueError:
+                caption_len = 0
+            if caption_len < 0:
+                caption_len = 0
+
             data = bytearray()
             while len(data) < size:
                 chunk = stream.read(min(1 << 16, size - len(data)))
@@ -1153,8 +1266,17 @@ def handle_upload(conn, addr):
                 log("clipboard image: incomplete (%d/%d) from %s" % (len(data), size, addr[0]))
                 conn.sendall(b"ERR incomplete\n")
                 return
+
+            caption = bytearray()
+            while len(caption) < caption_len:
+                chunk = stream.read(min(1 << 16, caption_len - len(caption)))
+                if not chunk:
+                    break
+                caption += chunk
+            text = caption.decode("utf-8", "replace")
+
             # GTK 剪贴板只能在主循环线程里操作，这里排队过去
-            GLib.idle_add(set_clipboard_image, bytes(data))
+            GLib.idle_add(set_clipboard_image, bytes(data), text)
             conn.sendall(b"OK clipboard\n")
             return
 
