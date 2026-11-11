@@ -32,6 +32,9 @@ Ubuntu 安装包会创建应用菜单入口和开机自启的 systemd 用户服�
 - **特殊按键**：方向键、PageUp/PageDown、Esc、Tab、Insert。
 - **全键盘转发**：独立 Ctrl/Shift/Alt/Win、F1–F24、CapsLock/NumLock、小键盘、PrintScreen 和媒体键。
 - **鼠标转发**：接管鼠标时，移动、左/中/右键、侧键、滚轮都送到 Ubuntu（见「鼠标支持」）。
+- **屏幕边缘切换**：把鼠标推过指定屏幕边缘即可切换到 Ubuntu，从共享边缘推回即回到 Windows，像硬件 KVM（`typebridge.ini` 的 `edge_switch` 配置，默认关闭）。
+- **文件互传**：Windows 拖文件到边缘传送区（或托盘菜单）发往 Ubuntu；Ubuntu 端把文件拖进「发送到 Windows」小窗即落到 Windows 的接收目录（默认 `下载\typebridge`），走独立端口 4322/4323，传输不影响输入。
+- **剪贴板同步**：Windows 与 Ubuntu 之间自动互相同步文本剪贴板（对端为旧版守护进程时自动失效为单向或无）。
 - **组合键**：Ctrl/Alt/Win + 字母、数字、功能键，例如 `Ctrl+A`、`Alt+B`、`Win+E`。
 - **独立配置**：首次运行填入自己的 Ubuntu IP 和端口，保存在本地 `typebridge.ini`。
 - **低依赖**：Windows 端使用系统自带 .NET Framework；Ubuntu 端只需要 Python 3、GTK、xdotool 和可用的 X11 输入法。
@@ -189,11 +192,17 @@ port=4321
 keyboard_hotkey=Ctrl+Alt+U
 mouse_hotkey=Ctrl+Alt+M
 mouse_with_keyboard=1
+file_port=4322
+recv_dir=
+edge_switch=none
 ```
 
 - `keyboard_hotkey`：键盘切换快捷键，也是联动模式下的总切换键。
 - `mouse_hotkey`：取消联动后，单独切换鼠标的快捷键。
 - `mouse_with_keyboard`：`1` 表示键盘和鼠标一起切换；`0` 表示分别切换。
+- `file_port`：Windows→Ubuntu 的文件传输端口（Ubuntu→Windows 方向固定监听 4323）。
+- `recv_dir`：从 Ubuntu 收到的文件存放目录，留空表示 `下载\typebridge`。
+- `edge_switch`：边缘切换方向，`none`（默认，关闭）/ `left` / `right` / `top` / `bottom`。
 
 该文件不会提交到 Git 仓库；也可以直接在设置窗口里改，保存后立即生效。快捷键在设置窗口中点击输入框、按下组合键即可录制，至少需要包含 Ctrl、Alt 或 Shift 之一；普通键盘没有 F13–F24，如果想用一个几乎不会和任何软件冲突的整键做切换键，可以不带修饰键单独使用 **ScrollLock**、**Pause** 或 **Menu**（在设置里直接按对应键即可），也可以在配置文件里手写 `keyboard_hotkey=ScrollLock` 或 `Win+Pause`（F13–F24 同样只支持手写）。
 
@@ -284,6 +293,7 @@ TypeBridge 的线路协议是**明文 TCP，没有内置认证或 TLS**。安全
 - 或在可信局域网中使用，并通过防火墙限制 4321 端口。
 - **不要**在公网路由器上直接端口转发 4321。
 - 任何能连接 4321 端口的人都能向 Ubuntu 当前焦点窗口注入按键，**也能移动指针和点击**。
+- 文件传输额外占用 4322（发往 Ubuntu）与 4323（Windows 接收监听，`0.0.0.0`）。能访问 4323 的对端可以向你投放文件（文件名已做穿越与非法字符过滤），同样不要暴露到公网。
 
 Windows 端使用低级键盘与鼠标钩子：
 

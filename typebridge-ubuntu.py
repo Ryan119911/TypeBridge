@@ -26,13 +26,66 @@ import os
 import re
 import socket
 import subprocess
+import threading
 import time
 
 faulthandler.enable()
 
+# ---- 必须在任何 Gtk/Gdk 调用之前选定 DISPLAY ----
+# Gtk.Clipboard.get() 在模块导入阶段就会初始化 GTK；写死 :0 会让整个 GUI 栈失效。
+def _early_pick_display():
+    try:
+        import ctypes
+        lib = ctypes.CDLL("libX11.so.6")
+        lib.XOpenDisplay.restype = ctypes.c_void_p
+        lib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        lib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    except Exception:
+        return False
+    auths = [
+        os.environ.get("XAUTHORITY", ""),
+        "/run/user/%d/gdm/Xauthority" % os.getuid(),
+        os.path.expanduser("~/.Xauthority"),
+    ]
+    displays = []
+    if os.environ.get("DISPLAY"):
+        displays.append(os.environ["DISPLAY"])
+    try:
+        socks = []
+        for name in os.listdir("/tmp/.X11-unix"):
+            if name.startswith("X") and name[1:].isdigit():
+                path = os.path.join("/tmp/.X11-unix", name)
+                socks.append((os.path.getmtime(path), ":" + name[1:]))
+        for _, display in sorted(socks, reverse=True):
+            if display not in displays:
+                displays.append(display)
+    except OSError:
+        pass
+    for display in displays:
+        for path in auths:
+            if path and os.path.exists(path):
+                os.environ["XAUTHORITY"] = path
+            try:
+                dpy = lib.XOpenDisplay(display.encode())
+            except Exception:
+                dpy = None
+            if dpy:
+                os.environ["DISPLAY"] = display
+                try:
+                    lib.XCloseDisplay(dpy)
+                except Exception:
+                    pass
+                return True
+    return False
+
+
+_early_pick_display()
+
 import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, GLib
+
+
 
 CONF_DIR = os.path.expanduser("~/.config/typebridge")
 CONF_FILE = os.path.join(CONF_DIR, "config.json")
@@ -41,6 +94,8 @@ ROUTES_FILE = os.path.join(CONF_DIR, "routes.json")
 DEFAULT_CONF = {
     "bind": "0.0.0.0",
     "port": 4321,
+    "file_port": 4322,               # 文件接收端口，0 表示关闭
+    "file_dir": "",                 # 空 = 自动用系统桌面目录
     "auto_deactivate_fcitx": False,  # 本项目的拼音由 Ubuntu 输入法处理，不能自动关闭 fcitx
     "xdotool_delay_ms": 5,           # ASCII 逐字间隔
 }
@@ -134,6 +189,7 @@ def normalize_key(payload):
 CONF = dict(DEFAULT_CONF)
 ROUTES = {}
 CONNS = {}   # fileno -> {"sock":, "addr":, "buf": bytes}
+LAST_PEER = {"addr": None}   # 最近一个非本机客户端（Windows）
 
 
 def log(msg):
@@ -291,6 +347,8 @@ try:
     if _DPY:
         _xtst.XTestFakeRelativeMotionEvent.argtypes = [
             ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_ulong]
+        _xtst.XTestFakeMotionEvent.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_ulong]
         _xtst.XTestFakeButtonEvent.argtypes = [
             ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
     else:
@@ -300,12 +358,111 @@ except Exception as _xtest_error:
     _xtst = None
     log("XTEST unavailable (%r)，回退到 xdotool" % (_xtest_error,))
 
+# ---- 显示连接自愈 ----
+# 停在 GDM 登录界面时 jx 没有图形会话，XOpenDisplay 会失败；登录后 cookie 重新生成。
+# 这里做懒重连，登录后自动恢复，不必手动重启服务。
+_X_AUTH_CANDIDATES = [
+    os.environ.get("XAUTHORITY", ""),
+    "/run/user/%d/gdm/Xauthority" % os.getuid(),
+    os.path.expanduser("~/.Xauthority"),
+]
+_last_attach_try = 0.0
+_attach_failures = 0
+
+
+def _set_argtypes():
+    _xtst.XTestFakeRelativeMotionEvent.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_ulong]
+    _xtst.XTestFakeMotionEvent.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_ulong]
+    _xtst.XTestFakeButtonEvent.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
+
+
+def pick_display():
+    """在 GTK 初始化之前选定真正可用的 DISPLAY。
+
+    gdm 的登录界面在 :0，用户登录后会另起一个 X server（常见 :2）。
+    写死 :0 会导致 GTK/XTEST 全部连不上，连屏幕尺寸都发不出去。
+    """
+    try:
+        lib = _x11
+    except NameError:
+        return False
+    for display in _display_candidates():
+        for path in _X_AUTH_CANDIDATES:
+            if path and os.path.exists(path):
+                os.environ["XAUTHORITY"] = path
+            try:
+                dpy = lib.XOpenDisplay(display.encode())
+            except Exception:
+                dpy = None
+            if dpy:
+                os.environ["DISPLAY"] = display
+                log("picked DISPLAY=%s XAUTHORITY=%s" % (display, os.environ.get("XAUTHORITY") or "-"))
+                return True
+    return False
+
+
+def _display_candidates():
+    """列出可能的显示：先环境变量，再从 /tmp/.X11-unix 里按时间新的优先。"""
+    found = []
+    env = os.environ.get("DISPLAY", "")
+    if env:
+        found.append(env)
+    try:
+        socks = []
+        for name in os.listdir("/tmp/.X11-unix"):
+            if name.startswith("X") and name[1:].isdigit():
+                path = os.path.join("/tmp/.X11-unix", name)
+                socks.append((os.path.getmtime(path), ":" + name[1:]))
+        for _, display in sorted(socks, reverse=True):
+            if display not in found:
+                found.append(display)
+    except OSError:
+        pass
+    return found
+
+
+def ensure_display(force=False):
+    """没有显示连接时尝试重连（限速 2 秒一次），连上返回 True。"""
+    global _DPY, _last_attach_try, _attach_failures
+    if _DPY:
+        return True
+    if _xtst is None:
+        return False
+    now = time.time()
+    if not force and now - _last_attach_try < 2.0:
+        return False
+    _last_attach_try = now
+    try:
+        for display in _display_candidates():
+            for path in _X_AUTH_CANDIDATES:
+                if path and os.path.exists(path):
+                    os.environ["XAUTHORITY"] = path
+                dpy = _x11.XOpenDisplay(display.encode())
+                if dpy:
+                    _DPY = dpy
+                    os.environ["DISPLAY"] = display
+                    _set_argtypes()
+                    _attach_failures = 0
+                    log("X display attached DISPLAY=%s XAUTHORITY=%s"
+                        % (display, os.environ.get("XAUTHORITY") or "-"))
+                    return True
+    except Exception as e:
+        log("X reconnect error: %r" % (e,))
+    _attach_failures += 1
+    if _attach_failures == 1 or _attach_failures % 60 == 0:
+        log("X display unavailable x%d（登录桌面后会自动重连）" % _attach_failures)
+    return False
+
+
 _pending_dx = 0
 _pending_dy = 0
 
 
 def pointer_move(dx, dy):
-    if _DPY:
+    if ensure_display():
         _xtst.XTestFakeRelativeMotionEvent(_DPY, dx, dy, 0)
         _x11.XFlush(_DPY)
     else:
@@ -313,7 +470,7 @@ def pointer_move(dx, dy):
 
 
 def pointer_button(button, down):
-    if _DPY:
+    if ensure_display():
         _xtst.XTestFakeButtonEvent(_DPY, button, 1 if down else 0, 0)
         _x11.XFlush(_DPY)
     else:
@@ -321,7 +478,7 @@ def pointer_button(button, down):
 
 
 def pointer_wheel(button):
-    if _DPY:
+    if ensure_display():
         _xtst.XTestFakeButtonEvent(_DPY, button, 1, 0)
         _xtst.XTestFakeButtonEvent(_DPY, button, 0, 0)
         _x11.XFlush(_DPY)
@@ -404,6 +561,91 @@ def mouse_wheel(payload):
     pointer_wheel(button)
 
 
+def pointer_move_abs(payload):
+    """P <x> <y>：把指针移到远端屏幕的绝对位置（切屏进入时用）。"""
+    parts = payload.split()
+    if len(parts) != 2:
+        log("bad P payload: %r" % (payload,))
+        return
+    try:
+        x = int(parts[0])
+        y = int(parts[1])
+    except ValueError:
+        log("bad P payload: %r" % (payload,))
+        return
+    x = max(0, min(65535, x))
+    y = max(0, min(65535, y))
+    if _DPY:
+        _xtst.XTestFakeMotionEvent(_DPY, -1, x, y, 0)
+        _x11.XFlush(_DPY)
+    else:
+        xdo("mousemove", str(x), str(y))
+
+
+# ---------- 剪贴板单向同步（文本） ----------
+
+_clipboard = None
+_clipboard_state = {"applied": "", "sent": "", "primed": False}
+
+
+def broadcast(line):
+    data = (line + "\n").encode("utf-8")
+    for st in list(CONNS.values()):
+        try:
+            st["sock"].sendall(data)
+        except OSError:
+            pass
+
+
+def set_clipboard(text):
+    """Windows -> Ubuntu：把文本写进本机剪贴板。"""
+    if not isinstance(text, str) or not text:
+        return
+    _clipboard_state["applied"] = text
+    try:
+        cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        cb.set_text(text, -1)
+        cb.store()
+        log("clipboard <- windows (%d chars)" % len(text))
+    except Exception as e:
+        log("clipboard set failed: %r" % (e,))
+
+
+def _clipboard_text_ready(clipboard, text, user_data):
+    if not text:
+        return
+    if not _clipboard_state["primed"]:
+        # 启动时先记下现有内容当基线，避免连上就把旧内容推给客户端
+        _clipboard_state["primed"] = True
+        _clipboard_state["sent"] = text
+        return
+    if text == _clipboard_state["applied"] or text == _clipboard_state["sent"]:
+        return
+    _clipboard_state["sent"] = text
+    log("clipboard -> windows (%d chars)" % len(text))
+    broadcast("C " + json.dumps(text))
+
+
+def _on_clipboard_owner_change(clipboard, event, user_data=None):
+    try:
+        clipboard.request_text(_clipboard_text_ready, None)
+    except Exception as e:
+        log("clipboard request failed: %r" % (e,))
+
+
+def watch_clipboard():
+    global _clipboard
+    try:
+        _clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        _clipboard.connect("owner-change", _on_clipboard_owner_change)
+        # 先取一次当前内容当基线，之后只在真正变化时才推送
+        _clipboard.request_text(_clipboard_text_ready, None)
+        log("clipboard watch enabled")
+    except Exception as e:
+        _clipboard = None
+        log("clipboard watch failed: %r" % (e,))
+
+
 def handle_line(line, sock):
     """返回 False 表示对端请求断开(QUIT)"""
     if line == "PING":
@@ -414,6 +656,37 @@ def handle_line(line, sock):
         return True
     if line == "QUIT":
         return False
+    if line.startswith("DIR "):
+        target = line[4:].strip()
+        # 空值表示「用默认桌面」：客户端 UI 是唯一事实来源，不能沿用上次的旧路径
+        CONF["file_dir"] = target
+        try:
+            os.makedirs(resolve_file_dir(), exist_ok=True)
+        except OSError as e:
+            log("file_dir mkdir failed: %r" % (e,))
+        try:
+            with open(CONF_FILE, "w", encoding="utf-8") as fh:
+                json.dump(CONF, fh, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        log("file_dir -> %s" % resolve_file_dir())
+        try:
+            sock.sendall(("DIR " + resolve_file_dir() + "\n").encode("utf-8"))
+        except OSError:
+            pass
+        return True
+    if line == "PEER":
+        # 拖放区要问：最近连进来的 Windows 是哪台。
+        # 调用者自己是 127.0.0.1，必须用记录下来的真实客户端地址。
+        addr = LAST_PEER["addr"]
+        if not addr:
+            st = CONNS.get(sock.fileno())
+            addr = st["addr"][0] if st else "0.0.0.0"
+        try:
+            sock.sendall(("PEER " + addr + "\n").encode("utf-8"))
+        except OSError:
+            pass
+        return True
     if len(line) < 3 or line[1] != " ":
         return True
     cmd, payload = line[0], line[2:]
@@ -436,6 +709,15 @@ def handle_line(line, sock):
         mouse_button(payload)
     elif cmd == "W":
         mouse_wheel(payload)
+    elif cmd == "P":
+        pointer_move_abs(payload)
+    elif cmd == "C":
+        try:
+            text = json.loads(payload)
+        except Exception as e:
+            log("bad C payload: %r" % (e,))
+            return True
+        set_clipboard(text)
     return True
 
 
@@ -464,6 +746,14 @@ def on_accept(fd, cond):
         conn, addr = srv.accept()
     except (BlockingIOError, OSError):
         return True
+    if not addr[0].startswith("127."):
+        LAST_PEER["addr"] = addr[0]
+    # 先告诉客户端远端屏幕尺寸，边缘切屏要用它算坐标
+    try:
+        screen = Gdk.Screen.get_default()
+        conn.sendall(("S %d %d\n" % (screen.get_width(), screen.get_height())).encode("utf-8"))
+    except Exception as e:
+        log("screen size send failed: %r" % (e,))
     conn.setblocking(False)
     st = {"sock": conn, "addr": addr, "buf": b""}
     CONNS[conn.fileno()] = st
@@ -512,7 +802,217 @@ def drop(fd, msg):
 srv = None
 
 
+# ---------- 文件接收（独立端口：一行头 + 原始字节） ----------
+
+FILE_MAX_NAME = 180
+
+
+def safe_name(name):
+    """只保留文件名本体，去掉路径和危险字符，避免写到别处。"""
+    name = os.path.basename((name or "").replace("\\", "/")).strip()
+    name = re.sub(r'[\x00-\x1f<>:"/\\|?*]', "_", name)
+    if name in ("", ".", ".."):
+        name = "file"
+    if len(name) > FILE_MAX_NAME:
+        root, ext = os.path.splitext(name)
+        name = root[:FILE_MAX_NAME - len(ext)] + ext
+    return name
+
+
+def unique_path(directory, name):
+    """同名只保留一份：直接覆盖，不再生成 (1)、(2) 副本。"""
+    return os.path.join(directory, name)
+
+
+def resolve_file_dir(name=""):
+    """默认直接落到桌面：不装任何 Ubuntu 端程序也能看到文件。"""
+    configured = str(CONF.get("file_dir") or "").strip()
+    if configured:
+        return os.path.expanduser(configured)
+    try:
+        desktop = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DESKTOP)
+        if desktop:
+            return desktop
+    except Exception:
+        pass
+    for candidate in ("~/Desktop", "~/桌面", "~/Downloads"):
+        path = os.path.expanduser(candidate)
+        if os.path.isdir(path):
+            return path
+    return os.path.expanduser("~/Downloads")
+
+
+def handle_upload(conn, addr):
+    try:
+        conn.settimeout(30)
+        stream = conn.makefile("rb")
+        header = stream.readline(4096).decode("utf-8", "replace").strip()
+        parts = header.split(" ", 2)
+        if len(parts) != 3 or parts[0] != "UPLOAD":
+            log("file: bad header %r from %s" % (header[:60], addr[0]))
+            conn.sendall(b"ERR bad header\n")
+            return
+        try:
+            size = int(parts[1])
+        except ValueError:
+            conn.sendall(b"ERR bad size\n")
+            return
+        if size < 0:
+            conn.sendall(b"ERR bad size\n")
+            return
+
+        name = safe_name(parts[2])
+        directory = resolve_file_dir(parts[2])
+        os.makedirs(directory, exist_ok=True)
+        dest = unique_path(directory, name)
+
+        received = 0
+        started = time.time()
+        temp_dest = dest + ".part"
+        with open(temp_dest, "wb") as out:
+            while received < size:
+                chunk = stream.read(min(1 << 16, size - received))
+                if not chunk:
+                    break
+                out.write(chunk)
+                received += len(chunk)
+
+        if received != size:
+            log("file: incomplete %s (%d/%d) from %s" % (name, received, size, addr[0]))
+            try:
+                os.remove(temp_dest)
+            except OSError:
+                pass
+            conn.sendall(b"ERR incomplete\n")
+            return
+
+        # 原子替换：要么是完整的旧文件，要么是完整的新文件，不会留下半截或副本
+        os.replace(temp_dest, dest)
+
+        elapsed = max(0.001, time.time() - started)
+        log("file <- %s (%d bytes, %.1f MB/s) -> %s"
+            % (name, size, size / elapsed / 1048576.0, dest))
+        conn.sendall(("OK " + dest + "\n").encode("utf-8"))
+    except Exception as e:
+        log("file upload failed: %r" % (e,))
+        try:
+            conn.sendall(b"ERR exception\n")
+        except OSError:
+            pass
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+def file_accept_loop(sock):
+    while True:
+        try:
+            conn, addr = sock.accept()
+        except OSError:
+            return
+        threading.Thread(target=handle_upload, args=(conn, addr), daemon=True).start()
+
+
+# ---------- 桌面出件箱：丢进文件夹就传到 Windows，无需额外程序 ----------
+
+OUTBOX_NAME = "发送到Windows"
+
+
+def desktop_dir():
+    """用户桌面目录（XDG），出件箱固定放这里，和 file_dir 无关。"""
+    try:
+        desktop = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DESKTOP)
+        if desktop:
+            return desktop
+    except Exception:
+        pass
+    for candidate in ("~/Desktop", "~/桌面"):
+        path = os.path.expanduser(candidate)
+        if os.path.isdir(path):
+            return path
+    return os.path.expanduser("~")
+
+
+def outbox_dir():
+    return os.path.join(desktop_dir(), OUTBOX_NAME)
+
+
+def push_file(path, host, port):
+    size = os.path.getsize(path)
+    sock = socket.create_connection((host, port), 5)
+    try:
+        sock.sendall(("UPLOAD %d %s\n" % (size, os.path.basename(path))).encode("utf-8"))
+        with open(path, "rb") as source:
+            while True:
+                chunk = source.read(1 << 16)
+                if not chunk:
+                    break
+                sock.sendall(chunk)
+        return sock.makefile("rb").readline(4096).decode("utf-8", "replace").strip()
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def outbox_worker(path):
+    peer = LAST_PEER["addr"]
+    if not peer:
+        return
+    port = int(CONF.get("file_recv_port", 4323))
+    try:
+        reply = push_file(path, peer, port)
+        if reply.startswith("OK"):
+            done = os.path.join(os.path.dirname(path), "已发送")
+            os.makedirs(done, exist_ok=True)
+            os.replace(path, os.path.join(done, os.path.basename(path)))
+            log("outbox -> %s: %s" % (peer, os.path.basename(path)))
+        else:
+            log("outbox failed: %s" % reply)
+    except Exception as e:
+        log("outbox error: %r" % (e,))
+
+
+def scan_outbox():
+    try:
+        directory = outbox_dir()
+        if not os.path.isdir(directory):
+            os.makedirs(directory, exist_ok=True)
+        if os.path.isdir(directory):
+            for name in sorted(os.listdir(directory)):
+                path = os.path.join(directory, name)
+                if os.path.isfile(path):
+                    threading.Thread(target=outbox_worker, args=(path,), daemon=True).start()
+    except Exception as e:
+        log("outbox scan error: %r" % (e,))
+    return True
+
+
+def start_file_server():
+    port = int(CONF.get("file_port", 4322) or 0)
+    if port <= 0:
+        log("file server disabled")
+        return
+    directory = resolve_file_dir()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind((str(CONF.get("bind", "0.0.0.0")), port))
+    except OSError as e:
+        log("文件端口 %d 绑定失败: %s" % (port, e))
+        return
+    sock.listen(4)
+    threading.Thread(target=file_accept_loop, args=(sock,), daemon=True).start()
+    log("file server on %s:%d -> %s" % (CONF.get("bind"), port, directory))
+
+
 def main():
+    if not pick_display():
+        log("没有可用的图形会话（可能在登录界面），退出等 systemd 重试")
+        sys.exit(3)
     global CONF, ROUTES, srv
     CONF.update(load_json(CONF_FILE, {}))
     ROUTES = load_json(ROUTES_FILE, {})
@@ -530,6 +1030,14 @@ def main():
     srv.listen(4)
     srv.setblocking(False)
     GLib.io_add_watch(srv.fileno(), GLib.IO_IN, on_accept)
+    watch_clipboard()
+    start_file_server()
+    try:
+        os.makedirs(outbox_dir(), exist_ok=True)
+        GLib.timeout_add_seconds(2, scan_outbox)
+        log("outbox watching: " + outbox_dir())
+    except Exception as e:
+        log("outbox setup failed: %r" % (e,))
     log("listening on %s:%d" % (bind, port))
     GLib.MainLoop().run()
 

@@ -1,7 +1,9 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.IO;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -12,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.4.1.0")]
+[assembly: AssemblyVersion("3.5.0.0")]
 
 namespace TypeBridgeApp
 {
@@ -375,68 +377,6 @@ namespace TypeBridgeApp
             if (Win) text.Append("Win+");
             text.Append(KeyName(Key));
             return text.ToString();
-        }
-    }
-
-    /// <summary>点击后按下组合键即可录制的快捷键输入框。</summary>
-    internal sealed class HotkeyBox : TextBox
-    {
-        private Hotkey value;
-
-        internal Hotkey Value
-        {
-            get { return value; }
-            set
-            {
-                this.value = value;
-                Text = value == null ? string.Empty : value.ToString();
-            }
-        }
-
-        internal HotkeyBox()
-        {
-            ReadOnly = true;
-            ShortcutsEnabled = false;
-            TextAlign = HorizontalAlignment.Center;
-            BackColor = SystemColors.Window;
-        }
-
-        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
-        {
-            Keys key = keyData & Keys.KeyCode;
-            if (key == Keys.None)
-                return base.ProcessCmdKey(ref msg, keyData);
-
-            if (key == Keys.Back || key == Keys.Delete)
-            {
-                value = null;
-                Text = string.Empty;
-                return true;
-            }
-
-            if (key == Keys.ControlKey || key == Keys.LControlKey || key == Keys.RControlKey ||
-                key == Keys.ShiftKey || key == Keys.LShiftKey || key == Keys.RShiftKey ||
-                key == Keys.Menu || key == Keys.LMenu || key == Keys.RMenu ||
-                key == Keys.LWin || key == Keys.RWin)
-            {
-                return true;
-            }
-
-            bool ctrl = (keyData & Keys.Control) == Keys.Control;
-            bool alt = (keyData & Keys.Alt) == Keys.Alt;
-            bool shift = (keyData & Keys.Shift) == Keys.Shift;
-            // Win 组合键会先被系统截获，无法可靠录制；配置文件里仍可手写 Win+...
-            bool win = false;
-
-            if (!ctrl && !alt && !shift &&
-                (key == Keys.Tab || key == Keys.Return || key == Keys.Escape))
-            {
-                return base.ProcessCmdKey(ref msg, keyData);
-            }
-
-            value = new Hotkey(ctrl, alt, shift, win, key);
-            Text = value.ToString();
-            return true;
         }
     }
 
@@ -1215,11 +1155,15 @@ namespace TypeBridgeApp
         private static extern bool SetCursorPos(int x, int y);
 
         [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int key);
+
+        [DllImport("user32.dll")]
         private static extern bool GetCursorPos(out Point point);
 
         private readonly HookProc callback;
         private readonly Timer flushTimer = new Timer();
         private readonly HashSet<int> pressedButtons = new HashSet<int>();
+        private readonly Rectangle screenBounds;
         private IntPtr hook = IntPtr.Zero;
         private int anchorX;
         private int anchorY;
@@ -1233,6 +1177,17 @@ namespace TypeBridgeApp
         private bool enabled;
         private bool connected;
 
+        // 边缘切屏
+        private bool watching;
+        private bool tracking;
+        private bool edgeArmed = true;
+        private int edgeHits;
+        private int virtualX;
+        private int virtualY;
+        private string switchEdge = "right";
+        private int remoteWidth = 1920;
+        private int remoteHeight = 1080;
+
         internal bool Enabled
         {
             get { return enabled; }
@@ -1241,6 +1196,61 @@ namespace TypeBridgeApp
                 enabled = value;
                 UpdateTimer();
             }
+        }
+
+        /// <summary>未接管时只观察光标是否撞到屏幕边缘，不拦截任何事件。</summary>
+        internal bool Watching
+        {
+            get { return watching; }
+            set
+            {
+                watching = value;
+                edgeHits = 0;
+                edgeArmed = true;
+            }
+        }
+
+        /// <summary>切屏方向：光标从这条边出去就进入 Ubuntu。</summary>
+        internal string SwitchEdge
+        {
+            get { return switchEdge; }
+            set { switchEdge = value ?? "right"; }
+        }
+
+        internal int RemoteWidth
+        {
+            get { return remoteWidth; }
+            set { if (value > 0) remoteWidth = value; }
+        }
+
+        internal int RemoteHeight
+        {
+            get { return remoteHeight; }
+            set { if (value > 0) remoteHeight = value; }
+        }
+
+        internal event EventHandler EdgeEntered;
+        internal event EventHandler EdgeReturned;
+
+        /// <summary>按住左键拖到判定线上时触发（用于唤出文件传送区）。</summary>
+        internal event EventHandler DragEdgeReached;
+        private bool dragEdgeFired;
+
+        internal int VirtualX { get { return virtualX; } }
+        internal int VirtualY { get { return virtualY; } }
+
+        /// <summary>接管时用远端屏幕坐标做起点，越界即认为要切回 Windows。</summary>
+        internal void BeginTracking(int x, int y)
+        {
+            virtualX = x;
+            virtualY = y;
+            tracking = true;
+            edgeArmed = false;
+        }
+
+        internal void StopTracking()
+        {
+            tracking = false;
         }
 
         internal bool Connected
@@ -1260,6 +1270,7 @@ namespace TypeBridgeApp
         internal GlobalMouseHook()
         {
             callback = MouseCallback;
+            screenBounds = Screen.PrimaryScreen.Bounds;
             Rectangle bounds = Screen.PrimaryScreen.Bounds;
             anchorX = bounds.Left + bounds.Width / 2;
             anchorY = bounds.Top + bounds.Height / 2;
@@ -1377,16 +1388,60 @@ namespace TypeBridgeApp
 
             try
             {
-                if (!Active)
+                bool capturing = Active;
+                bool watchingEdge = !capturing && watching && connected && hook != IntPtr.Zero;
+
+                if (!capturing && !watchingEdge)
                 {
                     pendingDx = 0;
                     pendingDy = 0;
                     pressedButtons.Clear();
+                    edgeHits = 0;
                     return CallNextHookEx(hook, nCode, wParam, lParam);
                 }
 
                 MouseData data = (MouseData)Marshal.PtrToStructure(lParam, typeof(MouseData));
                 int message = wParam.ToInt32();
+
+                if (watchingEdge)
+                {
+                    if (message == WmMouseMove)
+                    {
+                        bool leftHeld = (GetAsyncKeyState(0x01) & 0x8000) != 0;
+                        bool onEdge = AtSwitchEdgeNow(data.X, data.Y);
+
+                        if (!leftHeld || !onEdge)
+                            dragEdgeFired = false;
+
+                        if (leftHeld && onEdge)
+                        {
+                            // 按住左键拖到判定线：唤出文件传送区，先不切系统
+                            if (!dragEdgeFired)
+                            {
+                                dragEdgeFired = true;
+                                EventHandler dragging = DragEdgeReached;
+                                if (dragging != null)
+                                {
+                                    try { dragging(this, EventArgs.Empty); }
+                                    catch { }
+                                }
+                            }
+                            return CallNextHookEx(hook, nCode, wParam, lParam);
+                        }
+
+                        if (AtSwitchEdge(data.X, data.Y))
+                        {
+                            EventHandler entered = EdgeEntered;
+                            if (entered != null)
+                            {
+                                try { entered(this, EventArgs.Empty); }
+                                catch { }
+                            }
+                            return (IntPtr)1;
+                        }
+                    }
+                    return CallNextHookEx(hook, nCode, wParam, lParam);
+                }
 
                 switch (message)
                 {
@@ -1396,6 +1451,31 @@ namespace TypeBridgeApp
                         int dy = data.Y - anchorY;
                         if (dx != 0 || dy != 0)
                         {
+                            if (tracking)
+                            {
+                                virtualX += dx;
+                                virtualY += dy;
+                                // 只有「和 Windows 相接的那条边」越界才切回；其他三条边只是屏幕边界
+                                if (ShouldReturnToWindows(switchEdge, virtualX, virtualY, remoteWidth, remoteHeight))
+                                {
+                                    tracking = false;
+                                    pendingDx = 0;
+                                    pendingDy = 0;
+                                    EventHandler returned = EdgeReturned;
+                                    if (returned != null)
+                                    {
+                                        try { returned(this, EventArgs.Empty); }
+                                        catch { }
+                                    }
+                                    return (IntPtr)1;
+                                }
+
+                                // 非交接边：夹在远端屏幕范围内，避免坐标越积越远
+                                if (virtualX < 0) virtualX = 0;
+                                else if (virtualX > remoteWidth - 1) virtualX = remoteWidth - 1;
+                                if (virtualY < 0) virtualY = 0;
+                                else if (virtualY > remoteHeight - 1) virtualY = remoteHeight - 1;
+                            }
                             pendingDx = Clamp(pendingDx + dx);
                             pendingDy = Clamp(pendingDy + dy);
                             // 只在真的动了才钉回锚点，避免 SetCursorPos 自身触发事件形成回环
@@ -1463,6 +1543,90 @@ namespace TypeBridgeApp
             }
 
             return CallNextHookEx(hook, nCode, wParam, lParam);
+        }
+
+        /// <summary>
+        /// 光标是否贴在「切屏边」上并持续往外推。
+        /// 指针被系统夹在屏幕边上时仍会持续产生移动事件，所以连续三次贴边才判定切屏，
+        /// 避免只是滑到边上就误切。
+        /// </summary>
+        /// <summary>
+        /// 虚拟坐标是否已经越过「和 Windows 相接的那条边」。
+        /// left 表示 Ubuntu 在左，交界是 Ubuntu 的右边缘；以此类推。
+        /// </summary>
+        internal static bool ShouldReturnToWindows(string edge, int vx, int vy, int width, int height)
+        {
+            switch (edge)
+            {
+                case "left":
+                    return vx >= width;
+                case "top":
+                    return vy >= height;
+                case "bottom":
+                    return vy < 0;
+                default:
+                    return vx < 0;
+            }
+        }
+
+        /// <summary>光标此刻是否正好压在判定线上（拖动时用，不做三次去抖）。</summary>
+        private bool AtSwitchEdgeNow(int x, int y)
+        {
+            switch (switchEdge)
+            {
+                case "left":
+                    return x <= screenBounds.Left + 1;
+                case "top":
+                    return y <= screenBounds.Top + 1;
+                case "bottom":
+                    return y >= screenBounds.Bottom - 2;
+                default:
+                    return x >= screenBounds.Right - 2;
+            }
+        }
+
+        private bool AtSwitchEdge(int x, int y)
+        {
+            if (!edgeArmed)
+            {
+                const int margin = 4;
+                bool away = x > screenBounds.Left + margin && x < screenBounds.Right - margin - 1
+                    && y > screenBounds.Top + margin && y < screenBounds.Bottom - margin - 1;
+                if (away)
+                    edgeArmed = true;
+                return false;
+            }
+
+            bool atEdge;
+            switch (switchEdge)
+            {
+                case "left":
+                    atEdge = x <= screenBounds.Left;
+                    break;
+                case "top":
+                    atEdge = y <= screenBounds.Top;
+                    break;
+                case "bottom":
+                    atEdge = y >= screenBounds.Bottom - 1;
+                    break;
+                default:
+                    atEdge = x >= screenBounds.Right - 1;
+                    break;
+            }
+
+            if (!atEdge)
+            {
+                edgeHits = 0;
+                return false;
+            }
+
+            edgeHits++;
+            if (edgeHits < 3)
+                return false;
+
+            edgeHits = 0;
+            edgeArmed = false;
+            return true;
         }
 
         private void Flush()
@@ -1535,185 +1699,433 @@ namespace TypeBridgeApp
         }
     }
 
-    internal sealed class SettingsForm : Form
+    /// <summary>
+    /// 屏幕排列控件：中间是本机，点击上下左右把 Ubuntu 摆到那一侧，
+    /// 直观对应"第二台显示器放在哪边"。
+    /// </summary>
+    internal static class Glass
     {
-        private readonly TextBox hostBox = new TextBox();
-        private readonly TextBox portBox = new TextBox();
-        private readonly HotkeyBox keyboardBox = new HotkeyBox();
-        private readonly HotkeyBox mouseBox = new HotkeyBox();
-        private readonly CheckBox linkBox = new CheckBox();
-        private readonly Label mouseLabel = new Label();
-        private readonly Label errorLabel = new Label();
-
-        internal string Host { get; private set; }
-        internal int Port { get; private set; }
-        internal Hotkey KeyboardHotkey { get; private set; }
-        internal Hotkey MouseHotkey { get; private set; }
-        internal bool LinkMouse { get; private set; }
-
-        internal SettingsForm(string host, int port, Hotkey keyboardHotkey, Hotkey mouseHotkey,
-            bool linkMouse, bool firstRun)
+        [StructLayout(LayoutKind.Sequential)]
+        private struct AccentPolicy
         {
-            Host = host;
-            Port = port;
-            KeyboardHotkey = keyboardHotkey;
-            MouseHotkey = mouseHotkey;
-            LinkMouse = linkMouse;
+            internal int AccentState;
+            internal int AccentFlags;
+            internal int GradientColor;
+            internal int AnimationId;
+        }
 
-            try { Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath); }
-            catch { }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WindowCompositionAttributeData
+        {
+            internal int Attribute;
+            internal IntPtr Data;
+            internal int SizeOfData;
+        }
 
-            Text = firstRun ? "TypeBridge 首次设置" : "TypeBridge 设置";
-            FormBorderStyle = FormBorderStyle.FixedDialog;
-            StartPosition = FormStartPosition.CenterScreen;
-            MaximizeBox = false;
-            MinimizeBox = false;
+        [DllImport("user32.dll")]
+        private static extern int SetWindowCompositionAttribute(IntPtr hwnd, ref WindowCompositionAttributeData data);
+
+        internal static readonly Color WindowColor = Color.FromArgb(242, 245, 251);
+        internal static readonly Color CardColor = Color.FromArgb(251, 252, 255);
+
+        internal static GraphicsPath Rounded(Rectangle bounds, int radius)
+        {
+            GraphicsPath path = new GraphicsPath();
+            if (radius <= 1 || bounds.Width <= 0 || bounds.Height <= 0)
+            {
+                path.AddRectangle(bounds);
+                return path;
+            }
+
+            int size = Math.Min(radius * 2, Math.Min(bounds.Width, bounds.Height));
+            path.AddArc(bounds.X, bounds.Y, size, size, 180, 90);
+            path.AddArc(bounds.Right - size, bounds.Y, size, size, 270, 90);
+            path.AddArc(bounds.Right - size, bounds.Bottom - size, size, size, 0, 90);
+            path.AddArc(bounds.X, bounds.Bottom - size, size, size, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        /// <summary>给窗口加上真正的背景模糊（Win10/11）。返回是否成功。</summary>
+        internal static bool EnableAcrylic(IntPtr handle, Color tint)
+        {
+            try
+            {
+                AccentPolicy policy = new AccentPolicy();
+                policy.AccentState = 4;   // ACCENT_ENABLE_ACRYLICBLURBEHIND
+                // GradientColor 是 0xAABBGGRR
+                policy.GradientColor = (tint.A << 24) | (tint.B << 16) | (tint.G << 8) | tint.R;
+
+                int size = Marshal.SizeOf(policy);
+                IntPtr buffer = Marshal.AllocHGlobal(size);
+                try
+                {
+                    Marshal.StructureToPtr(policy, buffer, false);
+                    WindowCompositionAttributeData data = new WindowCompositionAttributeData();
+                    data.Attribute = 19;      // WCA_ACCENT_POLICY
+                    data.Data = buffer;
+                    data.SizeOfData = size;
+                    SetWindowCompositionAttribute(handle, ref data);
+                    return true;
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(buffer);
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>整窗底色：有亚克力时用薄雾，没有时用自带渐变，保证两种情况下都好看。</summary>
+        internal static void PaintWindow(Graphics g, Rectangle bounds, bool acrylic)
+        {
+            if (acrylic)
+            {
+                using (LinearGradientBrush veil = new LinearGradientBrush(bounds,
+                    Color.FromArgb(196, 255, 255, 255), Color.FromArgb(158, 224, 234, 248), 115f))
+                {
+                    g.FillRectangle(veil, bounds);
+                }
+            }
+            else
+            {
+                using (LinearGradientBrush back = new LinearGradientBrush(bounds,
+                    Color.FromArgb(244, 247, 252), Color.FromArgb(218, 228, 243), 120f))
+                {
+                    g.FillRectangle(back, bounds);
+                }
+            }
+
+            // 顶部高光
+            Rectangle gloss = new Rectangle(bounds.X, bounds.Y, bounds.Width, bounds.Height / 3);
+            using (LinearGradientBrush shine = new LinearGradientBrush(
+                new Rectangle(gloss.X, gloss.Y - 1, gloss.Width, gloss.Height + 1),
+                Color.FromArgb(acrylic ? 70 : 130, 255, 255, 255), Color.FromArgb(0, 255, 255, 255), 90f))
+            {
+                g.FillRectangle(shine, gloss);
+            }
+        }
+
+        internal static void PaintInputWells(Graphics g, Control parent)
+        {
+            foreach (Control child in parent.Controls)
+            {
+                TextBox box = child as TextBox;
+                if (box == null || !box.Visible)
+                    continue;
+                Rectangle well = new Rectangle(box.Left - 5, box.Top - 4, box.Width + 10, box.Height + 8);
+                using (GraphicsPath path = Rounded(well, 8))
+                {
+                    using (Brush fill = new SolidBrush(Color.FromArgb(238, 255, 255, 255)))
+                    {
+                        g.FillPath(fill, path);
+                    }
+                    using (Pen pen = new Pen(Color.FromArgb(120, 255, 255, 255), 1f))
+                    {
+                        g.DrawPath(pen, path);
+                    }
+                }
+            }
+        }
+
+        internal static void PaintCard(Graphics g, Rectangle bounds, int radius, Color top, Color bottom, Color border)
+        {
+            using (GraphicsPath path = Rounded(bounds, radius))
+            {
+                using (LinearGradientBrush fill = new LinearGradientBrush(
+                    new Rectangle(bounds.X, bounds.Y, bounds.Width, Math.Max(1, bounds.Height + 2)), top, bottom, 90f))
+                {
+                    g.FillPath(fill, path);
+                }
+                using (Pen pen = new Pen(border, 1f))
+                {
+                    g.DrawPath(pen, path);
+                }
+            }
+        }
+    }
+
+    internal sealed class DropPadForm : Form
+    {
+        private readonly Action<string[]> onDrop;
+        private bool hot;
+        private Point dragOrigin;
+        private bool draggingWindow;
+
+        internal DropPadForm(Action<string[]> handler)
+        {
+            onDrop = handler;
+            FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             TopMost = true;
-            // 纯代码创建的窗体不会自动缩放，按系统 DPI 手动换算，避免高缩放下文字截断。
-            ClientSize = new Size(UiScale.S(460), UiScale.S(410));
+            StartPosition = FormStartPosition.Manual;
+            ClientSize = new Size(UiScale.S(196), UiScale.S(126));
+            DoubleBuffered = true;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
+                | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            AllowDrop = true;
 
-            Label hostLabel = new Label();
-            hostLabel.Text = "Ubuntu 地址（Tailscale IP、局域网 IP 或主机名）";
-            hostLabel.AutoSize = true;
-            hostLabel.Location = new Point(UiScale.S(16), UiScale.S(14));
-
-            hostBox.Text = host;
-            hostBox.SetBounds(UiScale.S(16), UiScale.S(40), UiScale.S(428), UiScale.S(26));
-            hostBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-
-            Label portLabel = new Label();
-            portLabel.Text = "端口";
-            portLabel.AutoSize = true;
-            portLabel.Location = new Point(UiScale.S(16), UiScale.S(78));
-
-            portBox.Text = port.ToString();
-            portBox.SetBounds(UiScale.S(16), UiScale.S(102), UiScale.S(90), UiScale.S(26));
-
-            Label hint = new Label();
-            hint.Text = "默认 4321；请填写你自己的 Ubuntu 地址。";
-            hint.AutoSize = true;
-            hint.ForeColor = Color.Gray;
-            hint.Location = new Point(UiScale.S(120), UiScale.S(106));
-
-            GroupBox hotkeyGroup = new GroupBox();
-            hotkeyGroup.Text = "切换快捷键";
-            hotkeyGroup.SetBounds(UiScale.S(16), UiScale.S(140), UiScale.S(428), UiScale.S(158));
-
-            linkBox.Text = "键盘和鼠标一起切换（推荐）";
-            linkBox.Checked = linkMouse;
-            linkBox.SetBounds(UiScale.S(14), UiScale.S(18), UiScale.S(390), UiScale.S(24));
-            linkBox.CheckedChanged += delegate
+            using (GraphicsPath shape = Glass.Rounded(new Rectangle(0, 0, Width, Height), UiScale.S(20)))
             {
-                mouseBox.Enabled = !linkBox.Checked;
-                mouseLabel.Enabled = !linkBox.Checked;
+                Region = new Region(shape);
+            }
+
+            DragEnter += delegate(object sender, DragEventArgs e)
+            {
+                if (e.Data.GetDataPresent(DataFormats.FileDrop))
+                {
+                    e.Effect = DragDropEffects.Copy;
+                    hot = true;
+                    Invalidate();
+                }
+                else
+                {
+                    e.Effect = DragDropEffects.None;
+                }
             };
 
-            Label keyboardLabel = new Label();
-            keyboardLabel.Text = "键盘快捷键";
-            keyboardLabel.AutoSize = true;
-            keyboardLabel.Location = new Point(UiScale.S(14), UiScale.S(50));
-
-            keyboardBox.SetBounds(UiScale.S(104), UiScale.S(46), UiScale.S(190), UiScale.S(26));
-            keyboardBox.Value = keyboardHotkey;
-
-            mouseLabel.Text = "鼠标快捷键";
-            mouseLabel.AutoSize = true;
-            mouseLabel.Location = new Point(UiScale.S(14), UiScale.S(84));
-
-            mouseBox.SetBounds(UiScale.S(104), UiScale.S(80), UiScale.S(190), UiScale.S(26));
-            mouseBox.Value = mouseHotkey;
-            mouseBox.Enabled = !linkMouse;
-            mouseLabel.Enabled = !linkMouse;
-
-            Label hint2 = new Label();
-            hint2.Text = "点击输入框后按下组合键，至少包含 Ctrl、Alt 或 Shift；"
-                + "也可单独用 ScrollLock / Pause / Menu；取消联动后鼠标快捷键才生效。";
-            hint2.AutoSize = false;
-            hint2.SetBounds(UiScale.S(14), UiScale.S(114), UiScale.S(400), UiScale.S(38));
-            hint2.ForeColor = Color.Gray;
-
-            hotkeyGroup.Controls.Add(linkBox);
-            hotkeyGroup.Controls.Add(keyboardLabel);
-            hotkeyGroup.Controls.Add(keyboardBox);
-            hotkeyGroup.Controls.Add(mouseLabel);
-            hotkeyGroup.Controls.Add(mouseBox);
-            hotkeyGroup.Controls.Add(hint2);
-
-            errorLabel.AutoSize = false;
-            errorLabel.SetBounds(UiScale.S(16), UiScale.S(306), UiScale.S(428), UiScale.S(40));
-            errorLabel.ForeColor = Color.Firebrick;
-
-            Button cancelButton = new Button();
-            cancelButton.Text = "取消";
-            cancelButton.DialogResult = DialogResult.Cancel;
-            cancelButton.SetBounds(UiScale.S(252), UiScale.S(358), UiScale.S(84), UiScale.S(30));
-
-            Button saveButton = new Button();
-            saveButton.Text = "保存";
-            saveButton.SetBounds(UiScale.S(344), UiScale.S(358), UiScale.S(100), UiScale.S(30));
-            saveButton.Click += delegate
+            DragLeave += delegate
             {
-                errorLabel.Text = string.Empty;
-
-                string newHost = hostBox.Text.Trim();
-                if (newHost.Length == 0)
-                {
-                    errorLabel.Text = "请输入 Ubuntu 地址。";
-                    return;
-                }
-
-                int newPort;
-                if (!int.TryParse(portBox.Text.Trim(), out newPort) || newPort < 1 || newPort > 65535)
-                {
-                    errorLabel.Text = "端口必须是 1 到 65535 之间的数字。";
-                    return;
-                }
-
-                Hotkey newKeyboard = keyboardBox.Value;
-                if (newKeyboard == null || !newKeyboard.IsValidHotkey)
-                {
-                    errorLabel.Text = "键盘快捷键需要至少一个修饰键（Ctrl / Alt / Shift），"
-                        + "或使用 ScrollLock / Pause / Menu / F13–F24 这类无冲突整键。";
-                    return;
-                }
-
-                Hotkey newMouse = mouseBox.Value;
-                if (newMouse == null)
-                    newMouse = Hotkey.DefaultMouse();
-                if (!newMouse.IsValidHotkey)
-                {
-                    errorLabel.Text = "鼠标快捷键需要至少一个修饰键（Ctrl / Alt / Shift），"
-                        + "或使用 ScrollLock / Pause / Menu / F13–F24 这类无冲突整键。";
-                    return;
-                }
-                if (!linkBox.Checked && newMouse.ToString() == newKeyboard.ToString())
-                {
-                    errorLabel.Text = "键盘和鼠标的快捷键不能相同。";
-                    return;
-                }
-
-                Host = newHost;
-                Port = newPort;
-                KeyboardHotkey = newKeyboard;
-                MouseHotkey = newMouse;
-                LinkMouse = linkBox.Checked;
-                DialogResult = DialogResult.OK;
-                Close();
+                hot = false;
+                Invalidate();
             };
 
-            AcceptButton = saveButton;
-            CancelButton = cancelButton;
+            DragDrop += delegate(object sender, DragEventArgs e)
+            {
+                hot = false;
+                Invalidate();
+                string[] paths = e.Data.GetData(DataFormats.FileDrop) as string[];
+                if (paths != null && paths.Length > 0 && onDrop != null)
+                    onDrop(paths);
+            };
+        }
 
-            Controls.Add(hostLabel);
-            Controls.Add(hostBox);
-            Controls.Add(portLabel);
-            Controls.Add(portBox);
-            Controls.Add(hint);
-            Controls.Add(hotkeyGroup);
-            Controls.Add(errorLabel);
-            Controls.Add(cancelButton);
-            Controls.Add(saveButton);
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            Rectangle bounds = ClientRectangle;
+            using (LinearGradientBrush back = new LinearGradientBrush(bounds,
+                Color.FromArgb(250, 252, 255), Color.FromArgb(228, 236, 249), 100f))
+            {
+                g.FillRectangle(back, bounds);
+            }
+
+            Rectangle card = new Rectangle(1, 1, Width - 3, Height - 3);
+            using (GraphicsPath path = Glass.Rounded(card, UiScale.S(19)))
+            {
+                using (LinearGradientBrush fill = new LinearGradientBrush(
+                    new Rectangle(card.X, card.Y, card.Width, card.Height + 1),
+                    hot ? Color.FromArgb(255, 250, 252, 255) : Color.FromArgb(235, 252, 253, 255),
+                    hot ? Color.FromArgb(255, 226, 238, 254) : Color.FromArgb(205, 236, 242, 251), 90f))
+                {
+                    g.FillPath(fill, path);
+                }
+                using (Pen rim = new Pen(Color.FromArgb(210, 255, 255, 255), 1.3f))
+                {
+                    g.DrawPath(rim, path);
+                }
+                using (Pen shade = new Pen(Color.FromArgb(52, 96, 122, 158), 1f))
+                {
+                    g.DrawArc(shade, card.X + 1, card.Y + 1, card.Width - 2, card.Height - 2, 0, 90);
+                }
+            }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            int iconX = Width / 2 - UiScale.S(16);
+            int iconY = UiScale.S(22);
+            Rectangle paper = new Rectangle(iconX, iconY, UiScale.S(32), UiScale.S(38));
+            using (GraphicsPath path = Glass.Rounded(paper, UiScale.S(6)))
+            {
+                using (SolidBrush fill = new SolidBrush(Color.FromArgb(hot ? 255 : 220, 74, 132, 226)))
+                {
+                    g.FillPath(fill, path);
+                }
+            }
+            using (Pen line = new Pen(Color.FromArgb(235, 255, 255, 255), 1.6f))
+            {
+                g.DrawLine(line, paper.Left + UiScale.S(8), paper.Top + UiScale.S(14), paper.Right - UiScale.S(8), paper.Top + UiScale.S(14));
+                g.DrawLine(line, paper.Left + UiScale.S(8), paper.Top + UiScale.S(21), paper.Right - UiScale.S(8), paper.Top + UiScale.S(21));
+                g.DrawLine(line, paper.Left + UiScale.S(8), paper.Top + UiScale.S(28), paper.Left + UiScale.S(18), paper.Top + UiScale.S(28));
+            }
+
+            using (Font f = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold))
+            using (Brush b = new SolidBrush(Color.FromArgb(46, 56, 74)))
+            {
+                TextRenderer.DrawText(g, hot ? "松手就放进 Ubuntu 桌面" : "拖文件到这里", f,
+                    new Rectangle(0, UiScale.S(68), Width, UiScale.S(20)),
+                    Color.FromArgb(46, 56, 74),
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            }
+            using (Font f = new Font("Microsoft YaHei UI", 7.8f))
+            using (Brush b = new SolidBrush(Color.FromArgb(120, 130, 148)))
+            {
+                TextRenderer.DrawText(g, "→ Ubuntu 桌面", f,
+                    new Rectangle(0, UiScale.S(90), Width, UiScale.S(18)),
+                    Color.FromArgb(120, 130, 148),
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            }
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button == MouseButtons.Left)
+            {
+                draggingWindow = true;
+                dragOrigin = e.Location;
+            }
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (!draggingWindow)
+                return;
+            Location = new Point(Location.X + e.X - dragOrigin.X, Location.Y + e.Y - dragOrigin.Y);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            draggingWindow = false;
+            base.OnMouseUp(e);
+        }
+    }
+
+    /// <summary>
+    /// 按住左键拖到判定线时弹出的玻璃传送区。不抢焦点，这样拖动中的拖放仍能落到它身上。
+    /// </summary>
+    internal sealed class FileZoneForm : Form
+    {
+        private readonly Action<string[]> onDrop;
+        private bool hot;
+
+        internal FileZoneForm(Action<string[]> handler)
+        {
+            onDrop = handler;
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+            ClientSize = new Size(UiScale.S(340), UiScale.S(128));
+            DoubleBuffered = true;
+            AllowDrop = true;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
+                | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+
+            using (GraphicsPath shape = Glass.Rounded(new Rectangle(0, 0, Width, Height), UiScale.S(22)))
+            {
+                Region = new Region(shape);
+            }
+
+            DragEnter += delegate(object sender, DragEventArgs e)
+            {
+                if (e.Data.GetDataPresent(DataFormats.FileDrop))
+                {
+                    e.Effect = DragDropEffects.Copy;
+                    hot = true;
+                    Invalidate();
+                }
+                else
+                {
+                    e.Effect = DragDropEffects.None;
+                }
+            };
+            DragLeave += delegate { hot = false; Invalidate(); };
+            DragOver += delegate(object sender, DragEventArgs e)
+            {
+                e.Effect = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
+            };
+            DragDrop += delegate(object sender, DragEventArgs e)
+            {
+                hot = false;
+                Invalidate();
+                string[] paths = e.Data.GetData(DataFormats.FileDrop) as string[];
+                if (paths != null && paths.Length > 0 && onDrop != null)
+                    onDrop(paths);
+            };
+        }
+
+        protected override bool ShowWithoutActivation
+        {
+            get { return true; }
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x08000000;   // WS_EX_NOACTIVATE：别抢走拖动
+                cp.ExStyle |= 0x00000080;   // WS_EX_TOOLWINDOW：不进任务栏
+                return cp;
+            }
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            Rectangle card = new Rectangle(1, 1, Width - 3, Height - 3);
+            using (GraphicsPath path = Glass.Rounded(card, UiScale.S(21)))
+            {
+                using (LinearGradientBrush fill = new LinearGradientBrush(
+                    new Rectangle(card.X, card.Y, card.Width, card.Height + 1),
+                    hot ? Color.FromArgb(255, 244, 249, 255) : Color.FromArgb(238, 250, 252, 255),
+                    hot ? Color.FromArgb(255, 214, 232, 255) : Color.FromArgb(208, 234, 241, 252), 90f))
+                {
+                    g.FillPath(fill, path);
+                }
+                using (Pen rim = new Pen(Color.FromArgb(215, 255, 255, 255), 1.3f))
+                {
+                    g.DrawPath(rim, path);
+                }
+                using (Pen shade = new Pen(Color.FromArgb(55, 96, 122, 158), 1f))
+                {
+                    g.DrawArc(shade, card.X + 1, card.Y + 1, card.Width - 2, card.Height - 2, 0, 90);
+                }
+            }
+
+            // 虚线投放框
+            Rectangle inner = new Rectangle(UiScale.S(14), UiScale.S(14), Width - UiScale.S(28), Height - UiScale.S(28));
+            using (GraphicsPath dash = Glass.Rounded(inner, UiScale.S(14)))
+            using (Pen pen = new Pen(Color.FromArgb(150, 74, 132, 226), 1.6f))
+            {
+                pen.DashStyle = DashStyle.Dash;
+                g.DrawPath(pen, dash);
+            }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            string title = hot ? "松手就放进 Ubuntu 桌面" : "拖到这里，放进 Ubuntu 桌面";
+            using (Font f = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold))
+            {
+                TextRenderer.DrawText(g, title, f, new Rectangle(0, UiScale.S(38), Width, UiScale.S(24)),
+                    Color.FromArgb(40, 52, 74),
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            }
+            using (Font f = new Font("Microsoft YaHei UI", 8F))
+            {
+                TextRenderer.DrawText(g, "文件会直接出现在下位机桌面", f, new Rectangle(0, UiScale.S(64), Width, UiScale.S(20)),
+                    Color.FromArgb(118, 130, 150),
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            }
         }
     }
 
@@ -1729,6 +2141,8 @@ namespace TypeBridgeApp
         private readonly ToolStripMenuItem toggleItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem mouseToggleItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem settingsItem = new ToolStripMenuItem();
+        private readonly ToolStripMenuItem sendFileItem = new ToolStripMenuItem();
+        private readonly ToolStripMenuItem dropPadItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem exitItem = new ToolStripMenuItem();
         private readonly Timer connectionTimer = new Timer();
         private readonly JavaScriptSerializer json = new JavaScriptSerializer();
@@ -1737,12 +2151,26 @@ namespace TypeBridgeApp
         private NetworkStream stream;
         private string ip = "127.0.0.1";
         private int port = 4321;
+        private int filePort = 4322;
+        private int fileRecvPort = 4323;
+        private string recvDir = string.Empty;      // 从 Ubuntu 收到的文件放哪
+        private string remoteDir = string.Empty;    // 发到 Ubuntu 时落到哪个目录
+        private TcpListener fileListener;
+        private volatile bool receiverRunning;
+        private DropPadForm dropPad;
+        private FileZoneForm fileZone;
+        private Timer fileZoneTimer;
         private int mouseHz = 250;
         private Hotkey keyboardHotkey = Hotkey.DefaultKeyboard();
         private Hotkey mouseHotkey = Hotkey.DefaultMouse();
         private bool linkMouse = true;
+        private bool edgeSwitch = true;
+        private string switchEdge = "right";
+        private int remoteWidth = 1920;
+        private int remoteHeight = 1080;
         private bool keyboardMode;
         private bool mouseMode;
+        private DateTime lastPongUtc = DateTime.UtcNow;
         private bool configLoaded;
         private bool settingsOpen;
         private bool disposed;
@@ -1759,6 +2187,11 @@ namespace TypeBridgeApp
         private DateTime lastEnqueueUtc;
         private DateTime lastToggleUtc;
         private DateTime lastMouseToggleUtc;
+        private readonly Timer clipboardTimer = new Timer();
+        private string lastLocalClip;
+        private string lastRemoteClip;
+        private System.Threading.Thread readerThread;
+        private volatile bool readerRunning;
 
         internal BridgeApplicationContext()
         {
@@ -1792,6 +2225,12 @@ namespace TypeBridgeApp
             mouseHook.Moved += HookMouseMove;
             mouseHook.Button += HookMouseButton;
             mouseHook.Wheel += HookMouseWheel;
+            mouseHook.EdgeEntered += delegate { OnEdgeEntered(); };
+            mouseHook.EdgeReturned += delegate { OnEdgeReturned(); };
+            mouseHook.DragEdgeReached += delegate { ShowFileZone(); };
+            mouseHook.SwitchEdge = switchEdge;
+            mouseHook.RemoteWidth = remoteWidth;
+            mouseHook.RemoteHeight = remoteHeight;
             mouseHook.Install();
             mouseHook.SetRate(mouseHz);
             mouseHook.Enabled = false;
@@ -1800,11 +2239,17 @@ namespace TypeBridgeApp
             mouseToggleItem.Click += delegate { ToggleMouseMode(); };
             settingsItem.Text = "设置...";
             settingsItem.Click += delegate { ShowSettings(false); };
+            sendFileItem.Text = "发送文件到 Ubuntu...";
+            sendFileItem.Click += delegate { SendFilesDialog(); };
+            dropPadItem.Text = "文件拖放区（拖动文件直接传）";
+            dropPadItem.Click += delegate { ToggleDropPad(); };
             exitItem.Text = "退出 TypeBridge";
             exitItem.Click += delegate { ExitThread(); };
             trayMenu.Items.Add(toggleItem);
             trayMenu.Items.Add(mouseToggleItem);
             trayMenu.Items.Add(new ToolStripSeparator());
+            trayMenu.Items.Add(sendFileItem);
+            trayMenu.Items.Add(dropPadItem);
             trayMenu.Items.Add(settingsItem);
             trayMenu.Items.Add(exitItem);
 
@@ -1814,12 +2259,17 @@ namespace TypeBridgeApp
             tray.Visible = true;
 
             connectionTimer.Interval = 1000;
-            connectionTimer.Tick += delegate
-            {
-                ConnectToServer();
-                Heartbeat();
-            };
+            connectionTimer.Tick += delegate { ConnectionTick(); };
             connectionTimer.Start();
+            StartFileReceiver();
+
+
+            clipboardTimer.Interval = 600;
+            clipboardTimer.Tick += delegate { PollClipboard(); };
+            // 启动时把现有剪贴板当作基线，否则一连上就会把旧内容推给 Ubuntu
+            try { lastLocalClip = Clipboard.ContainsText() ? Clipboard.GetText() : string.Empty; }
+            catch { lastLocalClip = string.Empty; }
+            clipboardTimer.Start();
 
             ApplyHotkeys();
             SetKeyboardMode(false, false);
@@ -1917,12 +2367,42 @@ namespace TypeBridgeApp
                         if (int.TryParse(value, out configuredHz) && configuredHz >= 50 && configuredHz <= 1000)
                             mouseHz = configuredHz;
                     }
+                    if (key == "file_port")
+                    {
+                        int configuredFilePort;
+                        if (int.TryParse(value, out configuredFilePort) && configuredFilePort > 0 && configuredFilePort <= 65535)
+                            filePort = configuredFilePort;
+                    }
                     if (key == "keyboard_hotkey")
                         keyboardHotkey = Hotkey.Parse(value, keyboardHotkey);
                     if (key == "mouse_hotkey")
                         mouseHotkey = Hotkey.Parse(value, mouseHotkey);
                     if (key == "mouse_with_keyboard")
                         linkMouse = ParseBool(value, linkMouse);
+                    if (key == "edge_switch")
+                        edgeSwitch = ParseBool(value, edgeSwitch);
+                    if (key == "switch_edge")
+                    {
+                        string lower = value.Trim().ToLowerInvariant();
+                        if (lower == "left" || lower == "right" || lower == "top" || lower == "bottom")
+                            switchEdge = lower;
+                    }
+                    if (key == "file_port")
+                    {
+                        int parsed;
+                        if (int.TryParse(value, out parsed) && parsed > 0 && parsed <= 65535)
+                            filePort = parsed;
+                    }
+                    if (key == "file_recv_port")
+                    {
+                        int parsed;
+                        if (int.TryParse(value, out parsed) && parsed > 0 && parsed <= 65535)
+                            fileRecvPort = parsed;
+                    }
+                    if (key == "recv_dir")
+                        recvDir = value.Trim();
+                    if (key == "remote_dir")
+                        remoteDir = value.Trim();
                 }
             }
             catch
@@ -1947,6 +2427,11 @@ namespace TypeBridgeApp
                 return;
             settingsOpen = true;
 
+            if (System.Windows.Application.Current == null)
+            {
+                System.Windows.Application wpfApp = new System.Windows.Application();
+                wpfApp.ShutdownMode = System.Windows.ShutdownMode.OnExplicitShutdown;
+            }
             bool resumeKeyboard = keyboardMode;
             bool resumeMouse = mouseMode;
 
@@ -1962,10 +2447,10 @@ namespace TypeBridgeApp
 
             try
             {
-                using (SettingsForm form = new SettingsForm(
-                    ip, port, keyboardHotkey, mouseHotkey, linkMouse, firstRun))
+                WpfSettingsWindow form = new WpfSettingsWindow(
+                    ip, port, keyboardHotkey, mouseHotkey, linkMouse, switchEdge, recvDir, remoteDir, firstRun);
                 {
-                    if (form.ShowDialog() != DialogResult.OK)
+                    if (form.ShowDialog() != true)
                         return;
 
                     ip = form.Host;
@@ -1973,6 +2458,10 @@ namespace TypeBridgeApp
                     keyboardHotkey = form.KeyboardHotkey;
                     mouseHotkey = form.MouseHotkey;
                     linkMouse = form.LinkMouse;
+                    switchEdge = form.SwitchEdge;
+                    recvDir = form.RecvDir ?? string.Empty;
+                    remoteDir = form.RemoteDir ?? string.Empty;
+                    mouseHook.SwitchEdge = switchEdge;
 
                     if (!SaveConfiguration())
                         return;
@@ -2007,7 +2496,13 @@ namespace TypeBridgeApp
                         "port=" + port.ToString(),
                         "keyboard_hotkey=" + keyboardHotkey.ToString(),
                         "mouse_hotkey=" + mouseHotkey.ToString(),
-                        "mouse_with_keyboard=" + (linkMouse ? "1" : "0")
+                        "mouse_with_keyboard=" + (linkMouse ? "1" : "0"),
+                        "edge_switch=" + (edgeSwitch ? "1" : "0"),
+                        "switch_edge=" + switchEdge,
+                        "file_port=" + filePort.ToString(),
+                        "file_recv_port=" + fileRecvPort.ToString(),
+                        "recv_dir=" + recvDir,
+                        "remote_dir=" + remoteDir
                     },
                     new UTF8Encoding(false));
                 return true;
@@ -2107,12 +2602,14 @@ namespace TypeBridgeApp
             {
                 mouseHook.ResetAnchor();
                 mouseHook.Enabled = true;
+                mouseHook.Watching = false;
             }
             else
             {
                 mouseHook.ReleaseAll();
                 mouseHook.Enabled = false;
                 mouseHook.RestoreCursor();
+                mouseHook.Watching = edgeSwitch && stream != null;
             }
 
             mouseMode = remote;
@@ -2194,6 +2691,638 @@ namespace TypeBridgeApp
             SendLine("W " + e.Direction);
         }
 
+        // ---------- 边缘切屏 ----------
+
+        private static int MapRange(int value, int fromSize, int toSize, int toOrigin)
+        {
+            if (fromSize <= 0)
+                return toOrigin;
+            double ratio = value / (double)fromSize;
+            int mapped = toOrigin + (int)Math.Round(ratio * toSize);
+            if (mapped < toOrigin)
+                mapped = toOrigin;
+            if (mapped > toOrigin + toSize - 1)
+                mapped = toOrigin + toSize - 1;
+            return mapped;
+        }
+
+        private void OnEdgeEntered()
+        {
+            if (!edgeSwitch || mouseMode || stream == null)
+                return;
+
+            Rectangle b = Screen.PrimaryScreen.Bounds;
+            Point p = Cursor.Position;
+            int rx;
+            int ry;
+            switch (switchEdge)
+            {
+                case "left":
+                    rx = remoteWidth - 2;
+                    ry = MapRange(p.Y - b.Top, b.Height, remoteHeight, 0);
+                    break;
+                case "top":
+                    rx = MapRange(p.X - b.Left, b.Width, remoteWidth, 0);
+                    ry = remoteHeight - 2;
+                    break;
+                case "bottom":
+                    rx = MapRange(p.X - b.Left, b.Width, remoteWidth, 0);
+                    ry = 1;
+                    break;
+                default:
+                    rx = 1;
+                    ry = MapRange(p.Y - b.Top, b.Height, remoteHeight, 0);
+                    break;
+            }
+            EnterRemote(rx, ry, "边缘切屏");
+        }
+
+        private void OnEdgeReturned()
+        {
+            Rectangle b = Screen.PrimaryScreen.Bounds;
+            int wx;
+            int wy;
+            switch (switchEdge)
+            {
+                case "left":
+                    wx = b.Left + 1;
+                    wy = MapRange(mouseHook.VirtualY, remoteHeight, b.Height, b.Top);
+                    break;
+                case "top":
+                    wx = MapRange(mouseHook.VirtualX, remoteWidth, b.Width, b.Left);
+                    wy = b.Top + 1;
+                    break;
+                case "bottom":
+                    wx = MapRange(mouseHook.VirtualX, remoteWidth, b.Width, b.Left);
+                    wy = b.Bottom - 2;
+                    break;
+                default:
+                    wx = b.Right - 2;
+                    wy = MapRange(mouseHook.VirtualY, remoteHeight, b.Height, b.Top);
+                    break;
+            }
+
+            if (linkMouse)
+                SetKeyboardMode(false, false);
+            SetMouseMode(false, false);
+            mouseHook.Watching = edgeSwitch && stream != null;
+            try { Cursor.Position = new Point(wx, wy); }
+            catch { }
+        }
+
+        /// <summary>进入 Ubuntu：切换到远端坐标 (rx, ry) 并开始跟踪虚拟位置。</summary>
+        private void EnterRemote(int rx, int ry, string reason)
+        {
+            if (linkMouse)
+                SetKeyboardMode(true, false);
+            if (!SetMouseMode(true, false))
+                return;
+            mouseHook.BeginTracking(rx, ry);
+            SendLine("P " + rx.ToString() + " " + ry.ToString());
+            ShowTrayTip("TypeBridge", reason + " → Ubuntu");
+        }
+
+        // ---------- 剪贴板 ----------
+
+        private void PollClipboard()
+        {
+            if (stream == null || disposed)
+                return;
+
+            string text;
+            try
+            {
+                text = Clipboard.ContainsText() ? Clipboard.GetText() : string.Empty;
+            }
+            catch
+            {
+                return;
+            }
+
+            if (text == lastLocalClip)
+                return;
+            lastLocalClip = text;
+            if (text.Length == 0 || text == lastRemoteClip)
+                return;
+            SendLine("C " + json.Serialize(text));
+        }
+
+        private void ApplyRemoteClipboard(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+                return;
+            lastRemoteClip = text;
+            lastLocalClip = text;
+            try { Clipboard.SetText(text); }
+            catch { }
+        }
+
+        // ---------- 服务端下行消息 ----------
+
+        private void StartReader(NetworkStream target)
+        {
+            StopReader();
+            readerRunning = true;
+            lastPongUtc = DateTime.UtcNow;
+
+            // 始终下发：空值表示「用桌面」，否则守护进程会一直沿用上次的旧路径
+            SendLine("DIR " + (remoteDir ?? string.Empty).Trim());
+            readerThread = new System.Threading.Thread(delegate () { ReadLoop(target); });
+            readerThread.IsBackground = true;
+            readerThread.Start();
+        }
+
+        private void StopReader()
+        {
+            readerRunning = false;
+            readerThread = null;
+        }
+
+        private void ReadLoop(NetworkStream target)
+        {
+            byte[] buffer = new byte[8192];
+            string pending = string.Empty;
+            while (readerRunning)
+            {
+                int count;
+                try
+                {
+                    count = target.Read(buffer, 0, buffer.Length);
+                }
+                catch
+                {
+                    break;
+                }
+                if (count <= 0)
+                    break;
+
+                pending += Encoding.UTF8.GetString(buffer, 0, count);
+                int index;
+                while ((index = pending.IndexOf('\n')) >= 0)
+                {
+                    string line = pending.Substring(0, index).TrimEnd('\r');
+                    pending = pending.Substring(index + 1);
+                    if (line.Length > 0)
+                        HandleServerLine(line);
+                }
+            }
+        }
+
+        private void HandleServerLine(string line)
+        {
+            if (line == "PONG")
+            {
+                lastPongUtc = DateTime.UtcNow;
+                return;
+            }
+            if (line.Length >= 2 && line[0] == 'S' && line[1] == ' ')
+            {
+                string[] parts = line.Substring(2).Split(' ');
+                int width;
+                int height;
+                if (parts.Length == 2 && int.TryParse(parts[0], out width) && int.TryParse(parts[1], out height)
+                    && width > 0 && height > 0)
+                {
+                    remoteWidth = width;
+                    remoteHeight = height;
+                    mouseHook.RemoteWidth = width;
+                    mouseHook.RemoteHeight = height;
+                }
+                return;
+            }
+
+            if (line.Length >= 2 && line[0] == 'C' && line[1] == ' ')
+            {
+                string text = null;
+                try { text = json.Deserialize<string>(line.Substring(2)); }
+                catch { }
+                if (text == null)
+                    return;
+                try
+                {
+                    hotkeyForm.BeginInvoke(new Action(delegate { ApplyRemoteClipboard(text); }));
+                }
+                catch { }
+            }
+        }
+
+        // ---------- 文件发送 ----------
+
+        // ---------- 文件拖放区与接收 ----------
+
+        /// <summary>按住左键拖到判定线时：在判定线内侧弹出玻璃传送区。</summary>
+        private void ShowFileZone()
+        {
+            if (mouseMode)
+                return;
+
+            if (fileZone == null || fileZone.IsDisposed)
+                fileZone = new FileZoneForm(delegate (string[] paths) { HideFileZone(); UploadFiles(paths); });
+
+            Rectangle area = Screen.PrimaryScreen.WorkingArea;
+            Point cursor = Cursor.Position;
+            int x;
+            int y;
+
+            switch (switchEdge)
+            {
+                case "left":
+                    x = area.Left + UiScale.S(28);
+                    y = cursor.Y - fileZone.Height / 2;
+                    break;
+                case "right":
+                    x = area.Right - fileZone.Width - UiScale.S(28);
+                    y = cursor.Y - fileZone.Height / 2;
+                    break;
+                case "top":
+                    x = cursor.X - fileZone.Width / 2;
+                    y = area.Top + UiScale.S(28);
+                    break;
+                default:
+                    x = cursor.X - fileZone.Width / 2;
+                    y = area.Bottom - fileZone.Height - UiScale.S(28);
+                    break;
+            }
+
+            x = Math.Max(area.Left + 8, Math.Min(area.Right - fileZone.Width - 8, x));
+            y = Math.Max(area.Top + 8, Math.Min(area.Bottom - fileZone.Height - 8, y));
+            fileZone.Location = new Point(x, y);
+
+            if (!fileZone.Visible)
+                fileZone.Show();
+            fileZone.BringToFront();
+
+            if (fileZoneTimer == null)
+            {
+                fileZoneTimer = new Timer();
+                fileZoneTimer.Interval = 4000;
+                fileZoneTimer.Tick += delegate { fileZoneTimer.Stop(); HideFileZone(); };
+            }
+            fileZoneTimer.Stop();
+            fileZoneTimer.Start();
+        }
+
+        private void HideFileZone()
+        {
+            if (fileZoneTimer != null)
+                fileZoneTimer.Stop();
+            if (fileZone != null && fileZone.Visible)
+                fileZone.Hide();
+        }
+
+        private void ToggleDropPad()
+        {
+            if (dropPad == null || dropPad.IsDisposed)
+            {
+                dropPad = new DropPadForm(delegate (string[] paths) { UploadFiles(paths); });
+                Rectangle area = Screen.PrimaryScreen.WorkingArea;
+                dropPad.Location = new Point(area.Right - dropPad.Width - 32, area.Bottom - dropPad.Height - 32);
+            }
+
+            if (dropPad.Visible)
+            {
+                dropPad.Hide();
+            }
+            else
+            {
+                dropPad.Show();
+                dropPad.BringToFront();
+            }
+        }
+
+        private void StartFileReceiver()
+        {
+            try
+            {
+                fileListener = new TcpListener(System.Net.IPAddress.Any, fileRecvPort);
+                fileListener.Start();
+                receiverRunning = true;
+                System.Threading.Thread thread = new System.Threading.Thread(FileAcceptLoop);
+                thread.IsBackground = true;
+                thread.Start();
+                Log.Write("file receiver on " + fileRecvPort);
+            }
+            catch (Exception ex)
+            {
+                Log.Write("file receiver failed: " + ex.Message);
+            }
+        }
+
+        private void FileAcceptLoop()
+        {
+            while (receiverRunning)
+            {
+                TcpClient incoming = null;
+                try
+                {
+                    incoming = fileListener.AcceptTcpClient();
+                }
+                catch
+                {
+                    return;
+                }
+
+                TcpClient target = incoming;
+                System.Threading.Thread worker = new System.Threading.Thread(delegate () { ReceiveUpload(target); });
+                worker.IsBackground = true;
+                worker.Start();
+            }
+        }
+
+        private void ReceiveUpload(TcpClient incoming)
+        {
+            try
+            {
+                incoming.ReceiveTimeout = 60000;
+                NetworkStream source = incoming.GetStream();
+
+                string header = ReadAsciiLine(source);
+                string[] parts = header.Split(new char[] { ' ' }, 3);
+                if (parts.Length != 3 || parts[0] != "UPLOAD")
+                {
+                    SendAscii(source, "ERR bad header");
+                    return;
+                }
+
+                long size;
+                if (!long.TryParse(parts[1], out size) || size < 0)
+                {
+                    SendAscii(source, "ERR bad size");
+                    return;
+                }
+
+                string directory = ResolveRecvDir();
+
+                string name = SafeFileName(parts[2]);
+                string dest = System.IO.Path.Combine(directory, name);
+                string temp = dest + ".part";
+
+                long remaining = size;
+                using (FileStream output = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    byte[] buffer = new byte[65536];
+                    while (remaining > 0)
+                    {
+                        int count = source.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining));
+                        if (count <= 0)
+                            break;
+                        output.Write(buffer, 0, count);
+                        remaining -= count;
+                    }
+                }
+
+                if (remaining != 0)
+                {
+                    try { File.Delete(temp); }
+                    catch { }
+                    SendAscii(source, "ERR incomplete");
+                    return;
+                }
+
+                // 同名只留一份：原子替换
+                if (File.Exists(dest))
+                    File.Delete(dest);
+                File.Move(temp, dest);
+
+                SendAscii(source, "OK " + dest);
+                string saved = name;
+                try
+                {
+                    hotkeyForm.BeginInvoke(new Action(delegate
+                    {
+                        ShowTrayTip("收到文件", saved + " → " + directory);
+                    }));
+                }
+                catch { }
+            }
+            catch (Exception ex)
+            {
+                try { SendAscii(incoming.GetStream(), "ERR " + ex.Message); }
+                catch { }
+            }
+            finally
+            {
+                try { incoming.Close(); }
+                catch { }
+            }
+        }
+
+        private string ResolveRecvDir()
+        {
+            string configured = (recvDir ?? string.Empty).Trim();
+            if (configured.Length > 0)
+                return Environment.ExpandEnvironmentVariables(configured);
+            return System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "typebridge");
+        }
+
+        private static string SafeFileName(string name)
+        {
+            string baseName = System.IO.Path.GetFileName((name ?? string.Empty).Replace('\\', '/'));
+            foreach (char bad in System.IO.Path.GetInvalidFileNameChars())
+                baseName = baseName.Replace(bad, '_');
+            if (baseName.Length == 0 || baseName == "." || baseName == "..")
+                baseName = "file";
+            return baseName;
+        }
+
+        private static string ReadAsciiLine(NetworkStream source)
+        {
+            List<byte> bytes = new List<byte>();
+            while (bytes.Count < 4096)
+            {
+                int value = source.ReadByte();
+                if (value < 0 || value == '\n')
+                    break;
+                if (value != '\r')
+                    bytes.Add((byte)value);
+            }
+            return Encoding.UTF8.GetString(bytes.ToArray());
+        }
+
+        private static void SendAscii(NetworkStream target, string text)
+        {
+            byte[] data = Encoding.UTF8.GetBytes(text + "\n");
+            target.Write(data, 0, data.Length);
+            target.Flush();
+        }
+
+        private void SendFilesDialog()
+        {
+            using (OpenFileDialog dialog = new OpenFileDialog())
+            {
+                dialog.Title = "选择要发送到 Ubuntu 的文件";
+                dialog.Multiselect = true;
+                dialog.CheckFileExists = true;
+                dialog.RestoreDirectory = true;
+                if (dialog.ShowDialog() != DialogResult.OK)
+                    return;
+
+                string[] files = dialog.FileNames;
+                if (files.Length == 0)
+                    return;
+
+                System.Threading.Thread worker = new System.Threading.Thread(delegate () { UploadFiles(files); });
+                worker.IsBackground = true;
+                worker.Start();
+            }
+        }
+
+        private void UploadFiles(string[] files)
+        {
+            int ok = 0;
+            string firstProblem = null;
+
+            foreach (string file in files)
+            {
+                string error;
+                if (UploadOne(file, out error))
+                {
+                    ok++;
+                }
+                else if (firstProblem == null)
+                {
+                    firstProblem = System.IO.Path.GetFileName(file) + "：" + (error ?? "发送失败");
+                }
+            }
+
+            string message = "已发送 " + ok + " / " + files.Length + " 个文件到 Ubuntu";
+            if (firstProblem != null)
+                message += "（" + firstProblem + "）";
+
+            try
+            {
+                hotkeyForm.BeginInvoke(new Action(delegate
+                {
+                    UpdateStatus();
+                    ShowTrayTip("发送文件", message);
+                }));
+            }
+            catch { }
+        }
+
+        private bool UploadOne(string path, out string error)
+        {
+            error = null;
+            TcpClient socket = null;
+            try
+            {
+                FileInfo info = new FileInfo(path);
+                if (!info.Exists)
+                {
+                    error = "文件不存在";
+                    return false;
+                }
+
+                socket = new TcpClient();
+                socket.NoDelay = true;
+                if (!socket.ConnectAsync(ip, filePort).Wait(4000))
+                {
+                    error = "连不上文件端口 " + filePort;
+                    return false;
+                }
+
+                NetworkStream target = socket.GetStream();
+                byte[] head = Encoding.UTF8.GetBytes("UPLOAD " + info.Length + " " + info.Name + "\n");
+                target.Write(head, 0, head.Length);
+
+                byte[] buffer = new byte[65536];
+                long sent = 0;
+                using (FileStream input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    int read;
+                    while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+                    {
+                        target.Write(buffer, 0, read);
+                        sent += read;
+                        ReportUploadProgress(info.Name, sent, info.Length);
+                    }
+                }
+                target.Flush();
+
+                string reply = ReadReply(socket);
+                if (reply == null)
+                {
+                    error = "没有收到 Ubuntu 的确认";
+                    return false;
+                }
+                if (!reply.StartsWith("OK"))
+                {
+                    error = reply;
+                    return false;
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+            finally
+            {
+                if (socket != null)
+                {
+                    try { socket.Close(); }
+                    catch { }
+                }
+            }
+        }
+
+        private long lastUploadTick;
+
+        private void ReportUploadProgress(string name, long sent, long total)
+        {
+            long now = Environment.TickCount;
+            if (sent < total && now - lastUploadTick < 250)
+                return;
+            lastUploadTick = now;
+            int percent = total <= 0 ? 100 : (int)(sent * 100 / total);
+            try
+            {
+                hotkeyForm.BeginInvoke(new Action(delegate
+                {
+                    tray.Text = "发送 " + percent + "%｜" + name;
+                }));
+            }
+            catch { }
+        }
+
+        private static string ReadReply(TcpClient socket)
+        {
+            try
+            {
+                socket.ReceiveTimeout = 15000;
+                NetworkStream source = socket.GetStream();
+                List<byte> bytes = new List<byte>();
+                byte[] chunk = new byte[256];
+                while (bytes.Count < 4096)
+                {
+                    int count = source.Read(chunk, 0, chunk.Length);
+                    if (count <= 0)
+                        break;
+                    bool finished = false;
+                    for (int i = 0; i < count; i++)
+                    {
+                        if (chunk[i] == (byte)'\n')
+                        {
+                            finished = true;
+                            break;
+                        }
+                        bytes.Add(chunk[i]);
+                    }
+                    if (finished)
+                        break;
+                }
+                if (bytes.Count == 0)
+                    return null;
+                return Encoding.UTF8.GetString(bytes.ToArray()).TrimEnd('\r');
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         private void ConnectToServer()
         {
             if (stream != null || connecting)
@@ -2246,6 +3375,9 @@ namespace TypeBridgeApp
                         catch { }
                         EnableKeepAlive(candidate);
                         StartSender();
+                        StartReader(stream);
+                        // 边缘切换开启且鼠标还在本机时，让鼠标钩子开始盯屏幕边缘
+                        mouseHook.Watching = edgeSwitch && !mouseMode;
                         UpdateStatus();
                     }));
                 }
@@ -2266,20 +3398,6 @@ namespace TypeBridgeApp
                 tcp.Client.IOControl(IOControlCode.KeepAliveValues, values, null);
             }
             catch { }
-        }
-
-        /// <summary>空闲超过 3 秒发一个 PING，既保活又让断链能被写操作尽快发现。</summary>
-        private void Heartbeat()
-        {
-            lock (sendGate)
-            {
-                if (stream == null)
-                    return;
-                if ((DateTime.UtcNow - lastEnqueueUtc).TotalSeconds < 3)
-                    return;
-                pendingLines.Enqueue("PING");
-                lastEnqueueUtc = DateTime.UtcNow;
-            }
         }
 
         private void StartSender()
@@ -2348,10 +3466,35 @@ namespace TypeBridgeApp
             catch { }
         }
 
+        /// <summary>
+        /// 每秒一次：发心跳；半开连接收不到 PONG 就把键鼠还给本机，
+        /// 避免"网络断了但 TCP 没报错"时人被困在 Ubuntu 模式。
+        /// </summary>
+        private void ConnectionTick()
+        {
+            if (stream != null)
+            {
+                SendLine("PING");
+
+                if ((keyboardMode || mouseMode) && (DateTime.UtcNow - lastPongUtc).TotalSeconds > 3)
+                {
+                    ShowTrayTip("已切回本机", "3 秒没收到 Ubuntu 回应，先把键盘鼠标还给你");
+                    SetKeyboardMode(false, false);
+                    SetMouseMode(false, false);
+                    CloseConnection();
+                    return;
+                }
+            }
+
+            ConnectToServer();
+        }
+
         private void CloseConnection()
         {
             // 先补发鼠标 up，再断开，避免 Ubuntu 端卡在拖拽状态
             mouseHook.ReleaseAll();
+            StopReader();
+            mouseHook.Watching = false;
             try
             {
                 if (client != null)
@@ -2367,6 +3510,13 @@ namespace TypeBridgeApp
             }
             mouseHook.Connected = false;
             mouseHook.RestoreCursor();
+            // 断了还留在 Ubuntu 模式 = 把用户锁在远端：立刻还给本机
+            if (mouseMode)
+            {
+                mouseMode = false;
+                mouseHook.Enabled = false;
+                UpdateStatus();
+            }
         }
 
         /// <summary>只把指令排队，立即返回。真正的网络写在后台发送线程里。</summary>
@@ -2396,6 +3546,13 @@ namespace TypeBridgeApp
                 disposed = true;
                 senderRunning = false;
                 connectionTimer.Stop();
+                clipboardTimer.Stop();
+                receiverRunning = false;
+                if (fileListener != null) { try { fileListener.Stop(); } catch { } }
+                if (dropPad != null) { dropPad.Close(); dropPad = null; }
+                if (fileZone != null) { fileZone.Close(); fileZone = null; }
+                if (fileZoneTimer != null) { fileZoneTimer.Stop(); fileZoneTimer.Dispose(); fileZoneTimer = null; }
+                StopReader();
                 mouseHook.ReleaseAll();
                 mouseHook.Dispose();
                 hook.Dispose();

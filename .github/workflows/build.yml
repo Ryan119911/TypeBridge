@@ -24,6 +24,16 @@ jobs:
           if (-not (Test-Path $csc)) {
             throw "未找到 Windows 自带的 .NET Framework C# 编译器：$csc"
           }
+          # 设置窗口用 WPF 编写（WpfSettings.cs），需要引用 WPF 程序集
+          $wpf = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\WPF"
+          if (-not (Test-Path (Join-Path $wpf "PresentationFramework.dll"))) {
+            $wpf = Join-Path $env:WINDIR "Microsoft.NET\Framework\v4.0.30319\WPF"
+          }
+          if (-not (Test-Path (Join-Path $wpf "PresentationFramework.dll"))) {
+            throw "未找到 WPF 程序集：$wpf"
+          }
+          $xaml = Get-ChildItem -Path "$env:WINDIR\Microsoft.NET\assembly\GAC_MSIL\System.Xaml" -Filter "System.Xaml.dll" -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1 -ExpandProperty FullName
           & $csc /nologo /target:winexe /platform:anycpu /optimize+ /codepage:65001 `
             /win32icon:"assets\typebridge.ico" `
             /out:"TypeBridge.exe" `
@@ -31,7 +41,11 @@ jobs:
             /reference:System.Drawing.dll `
             /reference:System.Windows.Forms.dll `
             /reference:System.Web.Extensions.dll `
-            "TypeBridge.cs"
+            /reference:"$wpf\PresentationFramework.dll" `
+            /reference:"$wpf\PresentationCore.dll" `
+            /reference:"$wpf\WindowsBase.dll" `
+            $(if ($xaml) { "/reference:`"$xaml`"" }) `
+            "TypeBridge.cs" "WpfSettings.cs"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-Item "TypeBridge.exe" | Select-Object FullName, Length
 
@@ -55,7 +69,7 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             export VERSION="${GITHUB_REF_NAME#v}"
           else
-            export VERSION="3.3.1"
+            export VERSION="3.5.0"
           fi
           bash ubuntu/build-deb.sh
 
