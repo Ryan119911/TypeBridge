@@ -12,7 +12,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.3.1.0")]
+[assembly: AssemblyVersion("3.4.0.0")]
 
 namespace TypeBridgeApp
 {
@@ -608,7 +608,17 @@ namespace TypeBridgeApp
             {
                 enabled = value;
                 if (value)
+                {
                     capsLockState = (GetKeyState(0x14) & 1) != 0;
+                }
+                else
+                {
+                    // 退出接管时清空钩子内部状态。残留的 suppressedKeys 会把之后
+                    // Windows 模式下的正常按键吞掉（表现为"键盘失灵"），必须清。
+                    modifierDown.Clear();
+                    modifierUsed.Clear();
+                    suppressedKeys.Clear();
+                }
             }
         }
 
@@ -654,18 +664,42 @@ namespace TypeBridgeApp
             return ModifierName(virtualKey) != null;
         }
 
+        private static bool IsDown(int virtualKey)
+        {
+            return (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
+        }
+
+        /// <summary>修饰键按下状态直接读硬件状态，不依赖事件跟踪，
+        /// 这样即使某次修饰键按下事件因钩子超时被漏掉，组合键仍能正确识别。</summary>
         private List<string> ActiveModifiers()
         {
             List<string> modifiers = new List<string>();
-            if (modifierDown.Contains(0xA2) || modifierDown.Contains(0xA3))
+            if (IsDown(0xA2) || IsDown(0xA3))
                 modifiers.Add("ctrl");
-            if (modifierDown.Contains(0xA4) || modifierDown.Contains(0xA5))
+            if (IsDown(0xA4) || IsDown(0xA5))
                 modifiers.Add("alt");
-            if (modifierDown.Contains(0xA0) || modifierDown.Contains(0xA1))
+            if (IsDown(0xA0) || IsDown(0xA1))
                 modifiers.Add("shift");
-            if (modifierDown.Contains(0x5B) || modifierDown.Contains(0x5C))
+            if (IsDown(0x5B) || IsDown(0x5C))
                 modifiers.Add("super");
             return modifiers;
+        }
+
+        /// <summary>修饰键状态失步自愈：物理上已松开、但钩子仍标记为按下的修饰键清掉。
+        /// 残留的幽灵修饰键会让之后所有组合键都带上它（表现为"键盘失灵"）。</summary>
+        private void ReconcileModifiers()
+        {
+            int[] tracked = new int[modifierDown.Count];
+            modifierDown.CopyTo(tracked);
+            foreach (int key in tracked)
+            {
+                if (!IsDown(key))
+                {
+                    modifierDown.Remove(key);
+                    modifierUsed.Remove(key);
+                    suppressedKeys.Remove(key);
+                }
+            }
         }
 
         private void MarkModifiersUsed()
@@ -840,6 +874,8 @@ namespace TypeBridgeApp
                         suppressedKeys.Add(vk);
                         return (IntPtr)1;
                     }
+
+                    ReconcileModifiers();
 
                     if (IsModifierKey(vk))
                     {
@@ -1522,6 +1558,17 @@ namespace TypeBridgeApp
         private bool settingsOpen;
         private bool disposed;
 
+        // 网络收发全部在后台线程执行。全局钩子也挂在 UI 线程上，如果在钩子回调里
+        // 同步写网络，Tailscale 链路一旦抖动（中继切换/半死连接），Write 会阻塞
+        // 几秒到几十秒：钩子回调超时，系统把按键鼠标放行给 Windows —— 表现就是
+        // "两台电脑同时响应"、修饰键状态失步、切换热键失灵。改队列后 UI 线程只入队。
+        private readonly Queue<string> pendingLines = new Queue<string>();
+        private readonly object sendGate = new object();
+        private System.Threading.Thread senderThread;
+        private volatile bool senderRunning;
+        private volatile bool connecting;
+        private DateTime lastEnqueueUtc;
+
         internal BridgeApplicationContext()
         {
             LoadConfiguration();
@@ -1564,7 +1611,11 @@ namespace TypeBridgeApp
             tray.Visible = true;
 
             connectionTimer.Interval = 1000;
-            connectionTimer.Tick += delegate { ConnectToServer(); };
+            connectionTimer.Tick += delegate
+            {
+                ConnectToServer();
+                Heartbeat();
+            };
             connectionTimer.Start();
 
             ApplyHotkeys();
@@ -1770,14 +1821,17 @@ namespace TypeBridgeApp
         private void ToggleKeyboardMode()
         {
             bool target = !keyboardMode;
+            if (target && stream == null)
+            {
+                ShowTrayTip("未切换", "尚未连接 Ubuntu，请检查地址和网络");
+                return;
+            }
             if (linkMouse)
             {
                 SetKeyboardMode(target, false);
-                bool mouseSwitched = SetMouseMode(target, false);
+                SetMouseMode(target, false);
                 if (target)
-                    ShowTrayTip("TypeBridge", mouseSwitched
-                        ? "键盘 + 鼠标 → Ubuntu"
-                        : "键盘 → Ubuntu（未连接，鼠标留在 Windows）");
+                    ShowTrayTip("TypeBridge", "键盘 + 鼠标 → Ubuntu，按 " + keyboardHotkey + " 切回");
                 else
                     ShowTrayTip("TypeBridge", "键盘 + 鼠标 → Windows");
             }
@@ -1796,6 +1850,13 @@ namespace TypeBridgeApp
 
         private void SetKeyboardMode(bool remote, bool notify)
         {
+            // 未连接时不接管键盘：否则按键全被吞掉又送不出去，用户连 Windows 都没法用
+            if (remote && stream == null)
+            {
+                if (notify)
+                    ShowTrayTip("键盘未切换", "尚未连接 Ubuntu，请检查地址和网络");
+                return;
+            }
             keyboardMode = remote;
             hook.Enabled = remote;
             UpdateStatus();
@@ -1907,34 +1968,154 @@ namespace TypeBridgeApp
 
         private void ConnectToServer()
         {
-            if (stream != null)
+            if (stream != null || connecting)
                 return;
-
-            TcpClient candidate = null;
-            try
+            connecting = true;
+            string host = ip;
+            int targetPort = port;
+            // 连接放到线程池：原来 Wait(400) 每秒阻塞 UI 线程 400ms，
+            // 期间全局钩子回调超时，按键鼠标会漏进 Windows。
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
-                candidate = new TcpClient();
-                // 小包即时发送，否则 Nagle 会攒到 ACK 才走，鼠标位移会明显发黏
-                candidate.NoDelay = true;
-                if (candidate.ConnectAsync(ip, port).Wait(400))
+                TcpClient candidate = null;
+                bool ok = false;
+                try
                 {
-                    client = candidate;
-                    stream = candidate.GetStream();
+                    candidate = new TcpClient();
+                    // 小包即时发送，否则 Nagle 会攒到 ACK 才走，鼠标位移会明显发黏
+                    candidate.NoDelay = true;
+                    ok = candidate.ConnectAsync(host, targetPort).Wait(600);
                 }
-                else
+                catch
                 {
-                    candidate.Close();
+                    ok = false;
                 }
-            }
-            catch
-            {
-                if (candidate != null)
+                if (!ok && candidate != null)
                 {
                     try { candidate.Close(); }
                     catch { }
                 }
+                try
+                {
+                    hotkeyForm.BeginInvoke(new MethodInvoker(delegate
+                    {
+                        connecting = false;
+                        if (!ok || stream != null || host != ip || targetPort != port)
+                        {
+                            if (ok)
+                            {
+                                try { candidate.Close(); }
+                                catch { }
+                            }
+                            return;
+                        }
+                        client = candidate;
+                        stream = candidate.GetStream();
+                        // 写超时：半死链路上 Write 最多卡 4 秒就报错，
+                        // 不至于把 UI 线程外的发送线程卡几十秒才判死
+                        try { stream.WriteTimeout = 4000; }
+                        catch { }
+                        EnableKeepAlive(candidate);
+                        StartSender();
+                        UpdateStatus();
+                    }));
+                }
+                catch { }
+            });
+        }
+
+        /// <summary>5 秒空闲后每 2 秒发 TCP 探测包，死链路几秒内触发写失败，
+        /// 而不是等系统默认的探测周期（可达数分钟）。</summary>
+        private static void EnableKeepAlive(TcpClient tcp)
+        {
+            try
+            {
+                byte[] values = new byte[12];
+                BitConverter.GetBytes(1ul).CopyTo(values, 0);
+                BitConverter.GetBytes(5000ul).CopyTo(values, 4);
+                BitConverter.GetBytes(2000ul).CopyTo(values, 8);
+                tcp.Client.IOControl(IOControlCode.KeepAliveValues, values, null);
             }
-            UpdateStatus();
+            catch { }
+        }
+
+        /// <summary>空闲超过 3 秒发一个 PING，既保活又让断链能被写操作尽快发现。</summary>
+        private void Heartbeat()
+        {
+            lock (sendGate)
+            {
+                if (stream == null)
+                    return;
+                if ((DateTime.UtcNow - lastEnqueueUtc).TotalSeconds < 3)
+                    return;
+                pendingLines.Enqueue("PING");
+                lastEnqueueUtc = DateTime.UtcNow;
+            }
+        }
+
+        private void StartSender()
+        {
+            senderRunning = false;
+            senderThread = new System.Threading.Thread(SenderLoop);
+            senderThread.IsBackground = true;
+            senderThread.Name = "TypeBridge-Sender";
+            senderRunning = true;
+            senderThread.Start();
+        }
+
+        private void SenderLoop()
+        {
+            while (senderRunning)
+            {
+                string line = null;
+                lock (sendGate)
+                {
+                    if (pendingLines.Count > 0)
+                        line = pendingLines.Dequeue();
+                }
+                if (line == null)
+                {
+                    System.Threading.Thread.Sleep(2);
+                    continue;
+                }
+                NetworkStream target = stream;
+                if (target == null)
+                    continue;
+                try
+                {
+                    byte[] bytes = Encoding.UTF8.GetBytes(line + "\n");
+                    target.Write(bytes, 0, bytes.Length);
+                    target.Flush();
+                }
+                catch
+                {
+                    NotifyConnectionLost();
+                    return;
+                }
+            }
+        }
+
+        /// <summary>发送线程发现断链后回到 UI 线程收尾：断开并把键鼠切回 Windows。
+        /// 这是兜底保护——即使切换热键在断链期间失灵，用户也不会被卡在 Ubuntu 模式。</summary>
+        private void NotifyConnectionLost()
+        {
+            try
+            {
+                hotkeyForm.BeginInvoke(new MethodInvoker(delegate
+                {
+                    bool wasActive = keyboardMode || mouseMode;
+                    CloseConnection();
+                    if (mouseMode)
+                        SetMouseMode(false, false);
+                    if (keyboardMode)
+                        SetKeyboardMode(false, false);
+                    mouseMode = false;
+                    UpdateStatus();
+                    if (wasActive)
+                        ShowTrayTip("连接已断开", "键盘鼠标已切回 Windows，自动重连中");
+                }));
+            }
+            catch { }
         }
 
         private void CloseConnection()
@@ -1949,26 +2130,25 @@ namespace TypeBridgeApp
             catch { }
             client = null;
             stream = null;
+            senderRunning = false;
+            lock (sendGate)
+            {
+                pendingLines.Clear();
+            }
             mouseHook.Connected = false;
             mouseHook.RestoreCursor();
         }
 
+        /// <summary>只把指令排队，立即返回。真正的网络写在后台发送线程里。</summary>
         private bool SendLine(string line)
         {
-            if (stream == null)
-                return false;
-            try
+            lock (sendGate)
             {
-                byte[] bytes = Encoding.UTF8.GetBytes(line + "\n");
-                stream.Write(bytes, 0, bytes.Length);
-                stream.Flush();
+                if (stream == null)
+                    return false;
+                pendingLines.Enqueue(line);
+                lastEnqueueUtc = DateTime.UtcNow;
                 return true;
-            }
-            catch
-            {
-                CloseConnection();
-                UpdateStatus();
-                return false;
             }
         }
 
@@ -1984,6 +2164,7 @@ namespace TypeBridgeApp
             if (!disposed)
             {
                 disposed = true;
+                senderRunning = false;
                 connectionTimer.Stop();
                 mouseHook.ReleaseAll();
                 mouseHook.Dispose();
