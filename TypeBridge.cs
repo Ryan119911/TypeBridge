@@ -12,7 +12,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.4.0.0")]
+[assembly: AssemblyVersion("3.4.1.0")]
 
 namespace TypeBridgeApp
 {
@@ -89,6 +89,87 @@ namespace TypeBridgeApp
                     DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "\r\n" + ex + "\r\n\r\n");
             }
             catch { }
+        }
+    }
+
+    /// <summary>
+    /// 轻量诊断日志：记录模式切换、热键命中、连接状态。
+    /// 出问题时直接看 typebridge.log 就能定位，不用再靠猜。
+    /// 超过 256KB 自动轮换成 .1 一份，不会无限增长。
+    /// </summary>
+    internal static class Log
+    {
+        private const long MaxBytes = 256 * 1024;
+        private static readonly object Gate = new object();
+        private static readonly Queue<string> Pending = new Queue<string>();
+        private static System.Threading.Thread writer;
+        private static bool pathBroken;
+
+        /// <summary>
+        /// 只入队，立即返回。钩子回调里绝不能碰磁盘——一次 fsync 抖动就够让
+        /// 低级钩子超时被系统摘掉，那正是"切不回 Windows"的另一条死路。
+        /// </summary>
+        internal static void Write(string message)
+        {
+            if (pathBroken)
+                return;
+            try
+            {
+                lock (Gate)
+                {
+                    if (Pending.Count > 500)
+                        Pending.Clear();
+                    Pending.Enqueue(DateTime.Now.ToString("MM-dd HH:mm:ss.fff") + "  " + message);
+                    if (writer != null)
+                        return;
+                    writer = new System.Threading.Thread(WriterLoop);
+                    writer.IsBackground = true;
+                    writer.Name = "TypeBridge-Log";
+                    writer.Start();
+                }
+            }
+            catch
+            {
+                pathBroken = true;
+            }
+        }
+
+        private static void WriterLoop()
+        {
+            while (true)
+            {
+                string line = null;
+                lock (Gate)
+                {
+                    if (Pending.Count > 0)
+                        line = Pending.Dequeue();
+                    else
+                        writer = null;
+                }
+                if (line == null)
+                    return;
+                try
+                {
+                    string path = System.IO.Path.Combine(
+                        AppDomain.CurrentDomain.BaseDirectory, "typebridge.log");
+                    try
+                    {
+                        System.IO.FileInfo info = new System.IO.FileInfo(path);
+                        if (info.Exists && info.Length > MaxBytes)
+                        {
+                            System.IO.File.Copy(path, path + ".1", true);
+                            System.IO.File.WriteAllText(path, string.Empty);
+                        }
+                    }
+                    catch { }
+                    System.IO.File.AppendAllText(path, line + "\r\n");
+                }
+                catch
+                {
+                    pathBroken = true;
+                    return;
+                }
+            }
         }
     }
 
@@ -225,8 +306,32 @@ namespace TypeBridgeApp
                 case "DOWN": return Keys.Down;
                 case "LEFT": return Keys.Left;
                 case "RIGHT": return Keys.Right;
+                case "SCROLLLOCK":
+                case "SCROLL": return Keys.Scroll;
+                case "PAUSE": return Keys.Pause;
+                case "MENU":
+                case "APPS": return Keys.Apps;
                 default: return Keys.None;
             }
+        }
+
+        /// <summary>
+        /// 可以不带修饰键单独用作切换热键的"整键"。这些键几乎没有软件占用：
+        /// 普通键盘只有 F1–F12，没有 F13–F24，所以把 ScrollLock / Pause / Menu
+        /// 也放进来——它们在绝大多数键盘上都存在，又是应用程序基本不用的键。
+        /// </summary>
+        internal static bool IsSafeBareKey(Keys key)
+        {
+            int code = (int)key;
+            if (code >= 0x7C && code <= 0x87)  // F13–F24
+                return true;
+            return key == Keys.Scroll || key == Keys.Pause || key == Keys.Apps;
+        }
+
+        /// <summary>该组合作为全局热键是否合法：要么带修饰键，要么是安全整键。</summary>
+        internal bool IsValidHotkey
+        {
+            get { return HasModifier || IsSafeBareKey(Key); }
         }
 
         private static string KeyName(Keys key)
@@ -254,6 +359,9 @@ namespace TypeBridgeApp
                 case Keys.Down: return "Down";
                 case Keys.Left: return "Left";
                 case Keys.Right: return "Right";
+                case Keys.Scroll: return "ScrollLock";
+                case Keys.Pause: return "Pause";
+                case Keys.Apps: return "Menu";
                 default: return key.ToString();
             }
         }
@@ -597,9 +705,19 @@ namespace TypeBridgeApp
         private readonly HashSet<int> suppressedKeys = new HashSet<int>();
         private readonly HashSet<int> modifierDown = new HashSet<int>();
         private readonly HashSet<int> modifierUsed = new HashSet<int>();
+
+        // 被我们吞掉过 keydown、但还没等到 keyup 的键。退出接管那一刻 suppressedKeys
+        // 会被清空，这个集合故意不清：否则 hotkey 按下后立刻切回 Windows，剩下的
+        // 半截 keyup 会漏进当前窗口（部分程序会因此弹出菜单栏）。
+        private readonly HashSet<int> swallowUps = new HashSet<int>();
+        private readonly Dictionary<int, DateTime> modifierSince = new Dictionary<int, DateTime>();
         private IntPtr hook = IntPtr.Zero;
         private bool enabled;
         private bool capsLockState;
+
+        // 修饰键跟踪时长超过这个值、且硬件状态显示已松开，就判定为"幽灵修饰键"清掉。
+        // 阈值必须远大于人手按组合键的间隔，否则会把真的按住误判。
+        private static readonly TimeSpan GhostModifierAfter = TimeSpan.FromSeconds(8);
 
         internal bool Enabled
         {
@@ -615,18 +733,26 @@ namespace TypeBridgeApp
                 {
                     // 退出接管时清空钩子内部状态。残留的 suppressedKeys 会把之后
                     // Windows 模式下的正常按键吞掉（表现为"键盘失灵"），必须清。
+                    // swallowUps 与 modifierSince 是例外：它们要活到对应 keyup 到达为止。
                     modifierDown.Clear();
                     modifierUsed.Clear();
                     suppressedKeys.Clear();
+                    modifierSince.Clear();
                 }
+                Log.Write("hook.enabled=" + value);
             }
         }
 
         internal event EventHandler<BridgeKeyEventArgs> Key;
         internal event EventHandler ToggleRequested;
+        internal event EventHandler MouseToggleRequested;
 
         /// <summary>Ubuntu 模式下用于切回 Windows 的组合键，与托盘注册的热键保持一致。</summary>
         internal Hotkey ToggleHotkey { get; set; }
+
+        /// <summary>键鼠分离模式下，Ubuntu 模式里也必须能按下鼠标切换热键——
+        /// 此时 RegisterHotKey 收不到（按键已被钩子吞掉），只能由钩子识别。</summary>
+        internal Hotkey MouseHotkey { get; set; }
 
         internal GlobalKeyboardHook()
         {
@@ -669,43 +795,76 @@ namespace TypeBridgeApp
             return (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
         }
 
-        /// <summary>修饰键按下状态直接读硬件状态，不依赖事件跟踪，
-        /// 这样即使某次修饰键按下事件因钩子超时被漏掉，组合键仍能正确识别。</summary>
+        /// <summary>
+        /// 组合键判断用的修饰键集合。以钩子事件跟踪为准，硬件状态只作补充。
+        ///
+        /// 为什么不能反过来（3.4.0 的 bug）：Ubuntu 模式下修饰键的 keydown 是被我们
+        /// 吞掉的，系统异步键状态压根不会记录它——实测在被吞键的钩子里
+        /// GetAsyncKeyState(VK_MENU) 恒为 0。于是 "Alt+Z" 永远凑不齐 alt，
+        /// 切换热键彻底失效，用户被卡死在 Ubuntu 模式。
+        /// </summary>
         private List<string> ActiveModifiers()
         {
             List<string> modifiers = new List<string>();
-            if (IsDown(0xA2) || IsDown(0xA3))
+            if (modifierDown.Contains(0xA2) || modifierDown.Contains(0xA3)
+                || IsDown(0xA2) || IsDown(0xA3))
                 modifiers.Add("ctrl");
-            if (IsDown(0xA4) || IsDown(0xA5))
+            if (modifierDown.Contains(0xA4) || modifierDown.Contains(0xA5)
+                || IsDown(0xA4) || IsDown(0xA5))
                 modifiers.Add("alt");
-            if (IsDown(0xA0) || IsDown(0xA1))
+            if (modifierDown.Contains(0xA0) || modifierDown.Contains(0xA1)
+                || IsDown(0xA0) || IsDown(0xA1))
                 modifiers.Add("shift");
-            if (IsDown(0x5B) || IsDown(0x5C))
+            if (modifierDown.Contains(0x5B) || modifierDown.Contains(0x5C)
+                || IsDown(0x5B) || IsDown(0x5C))
                 modifiers.Add("super");
             return modifiers;
         }
 
-        /// <summary>修饰键状态失步自愈：物理上已松开、但钩子仍标记为按下的修饰键清掉。
-        /// 残留的幽灵修饰键会让之后所有组合键都带上它（表现为"键盘失灵"）。</summary>
+        /// <summary>
+        /// 幽灵修饰键自愈：只有"跟踪时间超过 GhostModifierAfter 且硬件确认已松开"
+        /// 才清掉。短时间的硬件状态不可信——那是我们自己吞键造成的，不是真的松手了。
+        /// </summary>
         private void ReconcileModifiers()
         {
+            if (modifierDown.Count == 0)
+                return;
+
+            DateTime now = DateTime.UtcNow;
             int[] tracked = new int[modifierDown.Count];
             modifierDown.CopyTo(tracked);
             foreach (int key in tracked)
             {
-                if (!IsDown(key))
+                DateTime since;
+                if (!modifierSince.TryGetValue(key, out since))
                 {
-                    modifierDown.Remove(key);
-                    modifierUsed.Remove(key);
-                    suppressedKeys.Remove(key);
+                    modifierSince[key] = now;
+                    continue;
                 }
+                if (now - since < GhostModifierAfter || IsDown(key))
+                    continue;
+
+                modifierDown.Remove(key);
+                modifierUsed.Remove(key);
+                suppressedKeys.Remove(key);
+                modifierSince.Remove(key);
+                Log.Write("ghost modifier cleared: " + key);
             }
         }
+
 
         private void MarkModifiersUsed()
         {
             foreach (int key in modifierDown)
                 modifierUsed.Add(key);
+        }
+
+        /// <summary>吞掉这个键：本次不外泄，同时记进 swallowUps 以便它松手时也吞掉。</summary>
+        private IntPtr Swallow(int virtualKey)
+        {
+            suppressedKeys.Add(virtualKey);
+            swallowUps.Add(virtualKey);
+            return (IntPtr)1;
         }
 
         private bool RaiseKey(string text, string keyName)
@@ -812,7 +971,8 @@ namespace TypeBridgeApp
         private string KeyText(KbdData data)
         {
             byte[] state = new byte[256];
-            if ((GetAsyncKeyState(0x10) & 0x8000) != 0)
+            // Shift 的按下事件已被我们吞掉，GetAsyncKeyState 读不到，只能用自己的跟踪结果
+            if (modifierDown.Contains(0xA0) || modifierDown.Contains(0xA1))
                 state[0x10] = 0x80;
             if (capsLockState)
                 state[0x14] = 0x01;
@@ -846,6 +1006,12 @@ namespace TypeBridgeApp
                     int vk = (int)data.VkCode;
                     if (up)
                     {
+                        // 先取"这个键当初是不是被我们吞掉的"，再决定放不放行。
+                        // 退出接管时 suppressedKeys 会被清空，swallowUps 不会，
+                        // 这样切换热键的半截 keyup 也不会漏进 Windows。
+                        bool swallowed = swallowUps.Remove(vk);
+                        modifierSince.Remove(vk);
+
                         if (IsModifierKey(vk))
                         {
                             bool wasDown = modifierDown.Remove(vk);
@@ -857,13 +1023,18 @@ namespace TypeBridgeApp
                                 if (modifier != null)
                                     RaiseKey(null, modifier);
                             }
-                            if (wasDown)
+                            if (wasDown || swallowed)
                                 return (IntPtr)1;
+                            return CallNextHookEx(hook, nCode, wParam, lParam);
                         }
-                        if (suppressedKeys.Remove(vk))
+                        if (swallowed || suppressedKeys.Remove(vk))
                             return (IntPtr)1;
                         return CallNextHookEx(hook, nCode, wParam, lParam);
                     }
+
+                    // 新的 keydown 意味着之前的按压状态已经过期，别让陈旧的 swallowUps
+                    // 把这一次的 keyup 也吞掉（否则 Windows 会卡住一个键）。
+                    swallowUps.Remove(vk);
 
                     if (!Enabled)
                         return CallNextHookEx(hook, nCode, wParam, lParam);
@@ -871,8 +1042,7 @@ namespace TypeBridgeApp
                     if (vk == (int)Keys.CapsLock)
                     {
                         capsLockState = !capsLockState;
-                        suppressedKeys.Add(vk);
-                        return (IntPtr)1;
+                        return Swallow(vk);
                     }
 
                     ReconcileModifiers();
@@ -880,22 +1050,39 @@ namespace TypeBridgeApp
                     if (IsModifierKey(vk))
                     {
                         if (modifierDown.Add(vk))
-                            suppressedKeys.Add(vk);
-                        return (IntPtr)1;
+                        {
+                            modifierSince[vk] = DateTime.UtcNow;
+                            Log.Write("modifier down: " + ModifierName(vk));
+                        }
+                        return Swallow(vk);
                     }
 
                     List<string> modifiers = ActiveModifiers();
                     if (ToggleHotkey != null && ToggleHotkey.Matches(modifiers, vk))
                     {
                         MarkModifiersUsed();
-                        suppressedKeys.Add(vk);
+                        Log.Write("toggle hotkey hit (hook) modifiers="
+                            + string.Join("+", modifiers.ToArray()) + " vk=" + vk);
                         EventHandler toggle = ToggleRequested;
                         if (toggle != null)
                         {
                             try { toggle(this, EventArgs.Empty); }
                             catch { }
                         }
-                        return (IntPtr)1;
+                        return Swallow(vk);
+                    }
+                    if (MouseHotkey != null && MouseHotkey.Matches(modifiers, vk))
+                    {
+                        MarkModifiersUsed();
+                        Log.Write("mouse hotkey hit (hook) modifiers="
+                            + string.Join("+", modifiers.ToArray()) + " vk=" + vk);
+                        EventHandler mouseToggle = MouseToggleRequested;
+                        if (mouseToggle != null)
+                        {
+                            try { mouseToggle(this, EventArgs.Empty); }
+                            catch { }
+                        }
+                        return Swallow(vk);
                     }
 
                     string baseKey = BaseKeyName(vk);
@@ -923,9 +1110,8 @@ namespace TypeBridgeApp
 
                     if (text != null || keyName != null)
                     {
-                        suppressedKeys.Add(vk);
                         RaiseKey(text, keyName);
-                        return (IntPtr)1;
+                        return Swallow(vk);
                     }
                 }
             }
@@ -1441,7 +1627,8 @@ namespace TypeBridgeApp
             mouseLabel.Enabled = !linkMouse;
 
             Label hint2 = new Label();
-            hint2.Text = "点击输入框后按下组合键，至少包含 Ctrl、Alt 或 Shift；取消联动后鼠标快捷键才生效。";
+            hint2.Text = "点击输入框后按下组合键，至少包含 Ctrl、Alt 或 Shift；"
+                + "也可单独用 ScrollLock / Pause / Menu；取消联动后鼠标快捷键才生效。";
             hint2.AutoSize = false;
             hint2.SetBounds(UiScale.S(14), UiScale.S(114), UiScale.S(400), UiScale.S(38));
             hint2.ForeColor = Color.Gray;
@@ -1484,18 +1671,20 @@ namespace TypeBridgeApp
                 }
 
                 Hotkey newKeyboard = keyboardBox.Value;
-                if (newKeyboard == null || !newKeyboard.HasModifier)
+                if (newKeyboard == null || !newKeyboard.IsValidHotkey)
                 {
-                    errorLabel.Text = "键盘快捷键需要至少一个修饰键（Ctrl / Alt / Shift）。";
+                    errorLabel.Text = "键盘快捷键需要至少一个修饰键（Ctrl / Alt / Shift），"
+                        + "或使用 ScrollLock / Pause / Menu / F13–F24 这类无冲突整键。";
                     return;
                 }
 
                 Hotkey newMouse = mouseBox.Value;
                 if (newMouse == null)
                     newMouse = Hotkey.DefaultMouse();
-                if (!newMouse.HasModifier)
+                if (!newMouse.IsValidHotkey)
                 {
-                    errorLabel.Text = "鼠标快捷键需要至少一个修饰键（Ctrl / Alt / Shift）。";
+                    errorLabel.Text = "鼠标快捷键需要至少一个修饰键（Ctrl / Alt / Shift），"
+                        + "或使用 ScrollLock / Pause / Menu / F13–F24 这类无冲突整键。";
                     return;
                 }
                 if (!linkBox.Checked && newMouse.ToString() == newKeyboard.ToString())
@@ -1568,21 +1757,35 @@ namespace TypeBridgeApp
         private volatile bool senderRunning;
         private volatile bool connecting;
         private DateTime lastEnqueueUtc;
+        private DateTime lastToggleUtc;
+        private DateTime lastMouseToggleUtc;
 
         internal BridgeApplicationContext()
         {
             LoadConfiguration();
             appIcon = LoadAppIcon();
+            Log.Write("---- TypeBridge " + Application.ProductVersion + " start, ip=" + ip
+                + ":" + port + " keyboard=" + keyboardHotkey + " mouse=" + mouseHotkey
+                + " linkMouse=" + linkMouse);
 
             hotkeyForm.ShowInTaskbar = false;
             hotkeyForm.Visible = false;
             IntPtr unusedHandle = hotkeyForm.Handle;
             GC.KeepAlive(unusedHandle);
-            hotkeyForm.KeyboardHotKeyPressed += delegate { ToggleKeyboardMode(); };
-            hotkeyForm.MouseHotKeyPressed += delegate { ToggleMouseMode(); };
+            hotkeyForm.KeyboardHotKeyPressed += delegate
+            {
+                Log.Write("toggle hotkey hit (RegisterHotKey)");
+                ToggleKeyboardMode();
+            };
+            hotkeyForm.MouseHotKeyPressed += delegate
+            {
+                Log.Write("mouse hotkey hit (RegisterHotKey)");
+                ToggleMouseMode();
+            };
 
             hook.Key += HookKey;
             hook.ToggleRequested += delegate { ToggleKeyboardMode(); };
+            hook.MouseToggleRequested += delegate { ToggleMouseMode(); };
             hook.Install();
             hook.Enabled = false;
 
@@ -1654,6 +1857,8 @@ namespace TypeBridgeApp
         private void ApplyHotkeys()
         {
             hook.ToggleHotkey = keyboardHotkey;
+            // 键鼠绑定模式下鼠标热键没有独立意义，交给钩子反而会误触发
+            hook.MouseHotkey = linkMouse ? null : mouseHotkey;
             hotkeyForm.Configure(keyboardHotkey, mouseHotkey, !linkMouse);
         }
 
@@ -1820,12 +2025,25 @@ namespace TypeBridgeApp
 
         private void ToggleKeyboardMode()
         {
+            // 同一次按键可能被 RegisterHotKey 与低级钩子各识别一次（叠加其它全局钩子时
+            // 顺序不确定），两次 toggle 会互相抵消，表现就是"按了没反应"。留个窗口去重。
+            DateTime now = DateTime.UtcNow;
+            if ((now - lastToggleUtc).TotalMilliseconds < 250)
+            {
+                Log.Write("toggle ignored (within 250ms)");
+                return;
+            }
+            lastToggleUtc = now;
+
             bool target = !keyboardMode;
             if (target && stream == null)
             {
+                Log.Write("toggle aborted: not connected");
                 ShowTrayTip("未切换", "尚未连接 Ubuntu，请检查地址和网络");
                 return;
             }
+            Log.Write("toggle keyboard -> " + (target ? "Ubuntu" : "Windows")
+                + " (linkMouse=" + linkMouse + ")");
             if (linkMouse)
             {
                 SetKeyboardMode(target, false);
@@ -1845,6 +2063,14 @@ namespace TypeBridgeApp
         {
             if (linkMouse)
                 return;
+            DateTime now = DateTime.UtcNow;
+            if ((now - lastMouseToggleUtc).TotalMilliseconds < 250)
+            {
+                Log.Write("mouse toggle ignored (within 250ms)");
+                return;
+            }
+            lastMouseToggleUtc = now;
+            Log.Write("toggle mouse -> " + (mouseMode ? "Windows" : "Ubuntu"));
             SetMouseMode(!mouseMode, true);
         }
 
@@ -1857,6 +2083,8 @@ namespace TypeBridgeApp
                     ShowTrayTip("键盘未切换", "尚未连接 Ubuntu，请检查地址和网络");
                 return;
             }
+            if (keyboardMode != remote)
+                Log.Write("keyboard mode=" + (remote ? "Ubuntu" : "Windows"));
             keyboardMode = remote;
             hook.Enabled = remote;
             UpdateStatus();
@@ -2011,6 +2239,7 @@ namespace TypeBridgeApp
                         }
                         client = candidate;
                         stream = candidate.GetStream();
+                        Log.Write("connected " + host + ":" + targetPort);
                         // 写超时：半死链路上 Write 最多卡 4 秒就报错，
                         // 不至于把 UI 线程外的发送线程卡几十秒才判死
                         try { stream.WriteTimeout = 4000; }
@@ -2104,6 +2333,7 @@ namespace TypeBridgeApp
                 hotkeyForm.BeginInvoke(new MethodInvoker(delegate
                 {
                     bool wasActive = keyboardMode || mouseMode;
+                    Log.Write("connection lost (wasActive=" + wasActive + ")");
                     CloseConnection();
                     if (mouseMode)
                         SetMouseMode(false, false);

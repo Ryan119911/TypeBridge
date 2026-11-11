@@ -195,7 +195,7 @@ mouse_with_keyboard=1
 - `mouse_hotkey`：取消联动后，单独切换鼠标的快捷键。
 - `mouse_with_keyboard`：`1` 表示键盘和鼠标一起切换；`0` 表示分别切换。
 
-该文件不会提交到 Git 仓库；也可以直接在设置窗口里改，保存后立即生效。快捷键在设置窗口中点击输入框、按下组合键即可录制，至少需要包含 Ctrl、Alt 或 Shift 之一。
+该文件不会提交到 Git 仓库；也可以直接在设置窗口里改，保存后立即生效。快捷键在设置窗口中点击输入框、按下组合键即可录制，至少需要包含 Ctrl、Alt 或 Shift 之一；普通键盘没有 F13–F24，如果想用一个几乎不会和任何软件冲突的整键做切换键，可以不带修饰键单独使用 **ScrollLock**、**Pause** 或 **Menu**（在设置里直接按对应键即可），也可以在配置文件里手写 `keyboard_hotkey=ScrollLock` 或 `Win+Pause`（F13–F24 同样只支持手写）。
 
 ### 3. 选择切换方式
 
@@ -433,6 +433,12 @@ systemctl --user restart typebridge
 ### 切换快捷键无反应
 
 快捷键可能被其他软件占用，或者设置里改成了别的组合。右键托盘图标可以直接切换，也可以打开“设置...”重新录制快捷键并查看是否提示“已被其他程序占用”。如果仍然无效，检查安全软件是否拦截了全局键盘钩子。
+
+**切到 Ubuntu 后切不回 Windows（3.4.0 的已知 bug，3.4.1 修复）**：接管期间修饰键的 keydown 会被钩子吞掉，系统的异步键状态因此不会记录它，
+`GetAsyncKeyState` 在被吞键的钩子里恒为 0，组合键永远凑不齐 Alt/Ctrl。3.4.1 改回以钩子事件跟踪为准（硬件状态仅作补充），
+并保证一次性吞掉的 keyup 不会漏进 Windows。排查时先看程序目录下的 `typebridge.log`：
+正常一次往返会依次出现 `toggle keyboard -> Ubuntu`、`keyboard mode=Ubuntu`、`hook.enabled=True`，
+以及切回时的 `toggle hotkey hit (hook) ...`、`keyboard mode=Windows`。
 
 ### 鼠标不动或点击没反应
 

@@ -3,6 +3,8 @@ typebridge.ini
 
 # 运行时异常日志
 typebridge-error.log
+typebridge.log
+typebridge.log.1
 
 # 本地构建产物
 *.exe
