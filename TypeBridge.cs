@@ -2166,6 +2166,9 @@ namespace TypeBridgeApp
         private bool linkMouse = true;
         private bool edgeSwitch = true;
         private string switchEdge = "right";
+        // 切换成功时右下角浮层：组合键方案需要提示"按什么切回"，边缘/整键切换后反而碍事，默认关。
+        // 想恢复在 typebridge.ini 里设 switch_toast=1。
+        private bool switchToast;
         private int remoteWidth = 1920;
         private int remoteHeight = 1080;
         private bool keyboardMode;
@@ -2387,6 +2390,8 @@ namespace TypeBridgeApp
                         if (lower == "left" || lower == "right" || lower == "top" || lower == "bottom")
                             switchEdge = lower;
                     }
+                    if (key == "switch_toast")
+                        switchToast = ParseBool(value, switchToast);
                     if (key == "file_port")
                     {
                         int parsed;
@@ -2499,6 +2504,7 @@ namespace TypeBridgeApp
                         "mouse_with_keyboard=" + (linkMouse ? "1" : "0"),
                         "edge_switch=" + (edgeSwitch ? "1" : "0"),
                         "switch_edge=" + switchEdge,
+                        "switch_toast=" + (switchToast ? "1" : "0"),
                         "file_port=" + filePort.ToString(),
                         "file_recv_port=" + fileRecvPort.ToString(),
                         "recv_dir=" + recvDir,
@@ -2543,10 +2549,13 @@ namespace TypeBridgeApp
             {
                 SetKeyboardMode(target, false);
                 SetMouseMode(target, false);
-                if (target)
-                    ShowTrayTip("TypeBridge", "键盘 + 鼠标 → Ubuntu，按 " + keyboardHotkey + " 切回");
-                else
-                    ShowTrayTip("TypeBridge", "键盘 + 鼠标 → Windows");
+                if (switchToast)
+                {
+                    if (target)
+                        ShowTrayTip("TypeBridge", "键盘 + 鼠标 → Ubuntu，按 " + keyboardHotkey + " 切回");
+                    else
+                        ShowTrayTip("TypeBridge", "键盘 + 鼠标 → Windows");
+                }
             }
             else
             {
@@ -2583,7 +2592,7 @@ namespace TypeBridgeApp
             keyboardMode = remote;
             hook.Enabled = remote;
             UpdateStatus();
-            if (notify)
+            if (notify && switchToast)
                 ShowTrayTip("TypeBridge", remote ? "键盘 → Ubuntu（使用 Ubuntu 输入法）" : "键盘 → Windows");
         }
 
@@ -2614,7 +2623,7 @@ namespace TypeBridgeApp
 
             mouseMode = remote;
             UpdateStatus();
-            if (notify)
+            if (notify && switchToast)
                 ShowTrayTip("TypeBridge", remote ? "鼠标 → Ubuntu" : "鼠标 → Windows");
             return true;
         }
@@ -2779,7 +2788,9 @@ namespace TypeBridgeApp
                 return;
             mouseHook.BeginTracking(rx, ry);
             SendLine("P " + rx.ToString() + " " + ry.ToString());
-            ShowTrayTip("TypeBridge", reason + " → Ubuntu");
+            Log.Write("enter remote: " + reason);
+            if (switchToast)
+                ShowTrayTip("TypeBridge", reason + " → Ubuntu");
         }
 
         // ---------- 剪贴板 ----------

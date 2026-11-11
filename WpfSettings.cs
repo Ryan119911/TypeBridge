@@ -3,11 +3,13 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
 using System.Windows.Shapes;
+using System.Windows.Shell;
 
 namespace TypeBridgeApp
 {
@@ -32,8 +34,12 @@ namespace TypeBridgeApp
         private readonly Switch linkSwitch = new Switch();
         private readonly ScreenArranger arranger = new ScreenArranger();
         private readonly TextBlock errorText = new TextBlock();
+        private readonly string initialEdge;
 
         private bool linkMouse;
+
+        [System.Runtime.InteropServices.DllImport("dwmapi.dll", PreserveSig = true)]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
 
         internal string Host { get; private set; }
         internal int Port { get; private set; }
@@ -43,6 +49,14 @@ namespace TypeBridgeApp
         internal string RemoteDir { get; private set; }
         internal string SwitchEdge { get { return arranger.Edge; } }
         internal bool LinkMouse { get { return linkMouse; } }
+
+        /// <summary>只接受守护进程认识的四个方向，缺省与 BridgeApplicationContext 一致（Ubuntu 在右）。</summary>
+        private static string NormalizeEdge(string value)
+        {
+            string lower = (value ?? string.Empty).Trim().ToLowerInvariant();
+            return lower == "left" || lower == "right" || lower == "top" || lower == "bottom"
+                ? lower : "right";
+        }
 
         internal WpfSettingsWindow(string host, int port, Hotkey keyboardHotkey, Hotkey mouseHotkey,
             bool linkMouseValue, string switchEdgeValue, string recvDirValue, string remoteDirValue, bool firstRun)
@@ -54,18 +68,39 @@ namespace TypeBridgeApp
             RecvDir = recvDirValue ?? string.Empty;
             RemoteDir = remoteDirValue ?? string.Empty;
             linkMouse = linkMouseValue;
+            initialEdge = NormalizeEdge(switchEdgeValue);
 
             Title = firstRun ? "TypeBridge 首次设置" : "TypeBridge 设置";
-            WindowStyle = WindowStyle.None;
-            AllowsTransparency = true;
-            Background = Brushes.Transparent;
-            ResizeMode = ResizeMode.NoResize;
+            // 系统窗口：分层透明窗口会强制 WPF 用灰度抗锯齿，关掉它才能真正走 ClearType。
+            // 标题栏由 WindowChrome 隐藏，阴影/圆角/边框交给 DWM；左右各留 6px 供系统拖宽。
+            WindowStyle = WindowStyle.SingleBorderWindow;
+            AllowsTransparency = false;
+            Background = new SolidColorBrush(Color.FromRgb(245, 248, 254));
+            WindowChrome.SetWindowChrome(this, new WindowChrome
+            {
+                CaptionHeight = 0,
+                CornerRadius = new CornerRadius(0),
+                GlassFrameThickness = new Thickness(0),
+                ResizeBorderThickness = new Thickness(6, 0, 6, 0),
+                UseAeroCaptionButtons = false
+            });
+            ResizeMode = ResizeMode.CanResize;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
-            ShowInTaskbar = false;
+            ShowInTaskbar = true;   // 最小化后才能从任务栏恢复
             Topmost = true;
             SizeToContent = SizeToContent.Height;
             MaxHeight = SystemParameters.WorkArea.Height - 12;
-            Width = 520;
+            Width = 560;
+            MinWidth = 470;
+            MaxWidth = 920;
+
+            // 文字清晰度：明确中文字体、小字号用 Display 模式对齐整像素、布局按整像素舍入。
+            // 阴影单独成层，不给含文字的容器挂 Effect，否则整棵树会被光栅化。
+            FontFamily = new FontFamily("Microsoft YaHei UI, Microsoft YaHei, Segoe UI");
+            TextOptions.SetTextFormattingMode(this, TextFormattingMode.Display);
+            TextOptions.SetTextRenderingMode(this, TextRenderingMode.ClearType);
+            UseLayoutRounding = true;
+            SnapsToDevicePixels = true;
 
             kbCapture = new HotkeyCapture(ActivateCapture);
             kbCapture.SetValue(keyboardHotkey);
@@ -74,6 +109,19 @@ namespace TypeBridgeApp
 
             Content = BuildContent();
             PreviewKeyDown += OnWindowKeyDown;
+        }
+
+        /// <summary>Win11 下让 DWM 给系统窗口画圆角；Win10 不认识这个属性，直接忽略。</summary>
+        protected override void OnSourceInitialized(EventArgs e)
+        {
+            base.OnSourceInitialized(e);
+            try
+            {
+                IntPtr hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+                int round = 2; // DWMWCP_ROUND
+                DwmSetWindowAttribute(hwnd, 33, ref round, sizeof(int));
+            }
+            catch { }
         }
 
         // ---------- 快捷键捕获 ----------
@@ -141,13 +189,10 @@ namespace TypeBridgeApp
         {
             Border shell = new Border
             {
-                Margin = new Thickness(16),
-                CornerRadius = new CornerRadius(18),
-                BorderThickness = new Thickness(1),
-                BorderBrush = new SolidColorBrush(Color.FromArgb(200, 255, 255, 255)),
+                // 系统窗口自带圆角与投影，内容铺满即可；四角由 DWM 裁成圆角
+                Margin = new Thickness(0),
                 Background = new LinearGradientBrush(
-                    Color.FromRgb(255, 255, 255), Color.FromRgb(240, 245, 253), new Point(0, 0), new Point(0.3, 1)),
-                Effect = Shadow(30, 8, 0.26)
+                    Color.FromRgb(255, 255, 255), Color.FromRgb(240, 245, 253), new Point(0, 0), new Point(0.3, 1))
             };
             shell.MouseLeftButtonDown += delegate { try { DragMove(); } catch { } };
 
@@ -157,7 +202,7 @@ namespace TypeBridgeApp
             stack.Children.Add(BuildAddressCard());
 
             StackPanel hotkeyBody = new StackPanel();
-            Border hotkeyCard = Card("切换快捷键", hotkeyBody);
+            UIElement hotkeyCard = Card("切换快捷键", hotkeyBody);
             hotkeyBody.Children.Add(BuildLinkRow());
             hotkeyBody.Children.Add(Row("键盘快捷键", kbCapture, 150));
             hotkeyBody.Children.Add(Row("鼠标快捷键", mouseCapture, 150));
@@ -165,8 +210,8 @@ namespace TypeBridgeApp
             stack.Children.Add(hotkeyCard);
 
             StackPanel layoutBody = new StackPanel();
-            Border layoutCard = Card("屏幕排列", layoutBody);
-            arranger.Edge = "left";
+            UIElement layoutCard = Card("屏幕排列", layoutBody);
+            arranger.Edge = initialEdge;
             layoutBody.Children.Add(arranger);
             TextBlock hint = Note("拖动 Ubuntu 方块摆放位置，松手后吸附到最近的边");
             hint.Margin = new Thickness(0, 8, 0, 0);
@@ -174,7 +219,7 @@ namespace TypeBridgeApp
             stack.Children.Add(layoutCard);
 
             StackPanel fileBody = new StackPanel();
-            Border fileCard = Card("文件路径", fileBody);
+            UIElement fileCard = Card("文件路径", fileBody);
             fileBody.Children.Add(Label("从 Ubuntu 收到的文件保存到"));
             Grid recvRow = new Grid { Margin = new Thickness(0, 0, 0, 12) };
             recvRow.ColumnDefinitions.Add(new ColumnDefinition());
@@ -225,7 +270,51 @@ namespace TypeBridgeApp
             layout.Children.Add(footer);
 
             shell.Child = layout;
-            return shell;
+
+            // 外层阴影改由 DWM 绘制，这里不再放自绘阴影层
+            Grid root = new Grid();
+            root.Children.Add(shell);
+
+            // 右下角给一个轻量的"可拉宽"提示，不吃鼠标事件
+            TextBlock resizeHint = new TextBlock
+            {
+                Text = "◢",
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromRgb(176, 190, 212)),
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Bottom,
+                Margin = new Thickness(0, 0, 8, 6),
+                IsHitTestVisible = false
+            };
+            root.Children.Add(resizeHint);
+            root.Children.Add(MakeResizeGrip(true));
+            root.Children.Add(MakeResizeGrip(false));
+            return root;
+        }
+
+        /// <summary>无边框窗口左右各放一条透明 grip，拖它改宽度（高度仍随内容自适应）。</summary>
+        private Thumb MakeResizeGrip(bool leftEdge)
+        {
+            Thumb grip = new Thumb
+            {
+                Width = 6,
+                HorizontalAlignment = leftEdge ? HorizontalAlignment.Left : HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Stretch,
+                Background = Brushes.Transparent,
+                BorderThickness = new Thickness(0),
+                Opacity = 0,
+                Cursor = Cursors.SizeWE,
+                IsTabStop = false
+            };
+            grip.DragDelta += delegate(object s, DragDeltaEventArgs e)
+            {
+                double change = leftEdge ? -e.HorizontalChange : e.HorizontalChange;
+                double target = Math.Max(MinWidth, Math.Min(MaxWidth, ActualWidth + change));
+                if (Math.Abs(target - ActualWidth) < 0.5) return;
+                if (leftEdge) Left += ActualWidth - target;
+                Width = target;
+            };
+            return grip;
         }
 
         private UIElement BuildHeader()
@@ -238,14 +327,14 @@ namespace TypeBridgeApp
             titles.Children.Add(new TextBlock
             {
                 Text = "TypeBridge",
-                FontSize = 21,
+                FontSize = 20,
                 FontWeight = FontWeights.Bold,
                 Foreground = new SolidColorBrush(Ink)
             });
             titles.Children.Add(new TextBlock
             {
                 Text = "Windows ⇄ Ubuntu 键鼠与文件",
-                FontSize = 12.5,
+                FontSize = 13,
                 Margin = new Thickness(0, 2, 0, 0),
                 Foreground = new SolidColorBrush(Sub)
             });
@@ -256,23 +345,51 @@ namespace TypeBridgeApp
                 Content = "✕",
                 Width = 30,
                 Height = 30,
-                FontSize = 12,
+                FontSize = 13,
                 Cursor = Cursors.Hand,
                 Background = Brushes.Transparent,
                 BorderThickness = new Thickness(0),
                 Foreground = new SolidColorBrush(Sub),
-                Template = RoundButtonTemplate()
+                Template = RoundButtonTemplate(0)
             };
+            close.ToolTip = "取消并关闭";
             close.Click += delegate { DialogResult = false; Close(); };
-            Grid.SetColumn(close, 1);
-            header.Children.Add(close);
+            AddChromeButtonHover(close);
+
+            Button minimize = new Button
+            {
+                Content = "—",
+                Width = 30,
+                Height = 30,
+                FontSize = 13,
+                Cursor = Cursors.Hand,
+                Background = Brushes.Transparent,
+                BorderThickness = new Thickness(0),
+                Foreground = new SolidColorBrush(Sub),
+                Template = RoundButtonTemplate(0),
+                ToolTip = "最小化",
+                Margin = new Thickness(0, 0, 2, 0)
+            };
+            minimize.Click += delegate { WindowState = WindowState.Minimized; };
+            AddChromeButtonHover(minimize);
+
+            StackPanel windowButtons = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Top
+            };
+            windowButtons.Children.Add(minimize);
+            windowButtons.Children.Add(close);
+            Grid.SetColumn(windowButtons, 1);
+            header.Children.Add(windowButtons);
             return header;
         }
 
         private UIElement BuildAddressCard()
         {
             StackPanel card = new StackPanel();
-            Border cardHost = Card("Ubuntu 地址", card);
+            UIElement cardHost = Card("Ubuntu 地址", card);
 
             Grid addressRow = new Grid();
             addressRow.ColumnDefinitions.Add(new ColumnDefinition());
@@ -385,14 +502,13 @@ namespace TypeBridgeApp
                 Content = "保存",
                 Width = 96,
                 Height = 38,
-                FontSize = 13.5,
+                FontSize = 14,
                 FontWeight = FontWeights.SemiBold,
                 Cursor = Cursors.Hand,
                 Foreground = Brushes.White,
                 Background = new SolidColorBrush(Accent),
                 BorderThickness = new Thickness(0),
-                Template = RoundButtonTemplate(),
-                Effect = Shadow(14, 3, 0.28)
+                Template = RoundButtonTemplate()
             };
             AddHoverOpacity(save);
             save.Click += delegate { Save(); };
@@ -445,28 +561,36 @@ namespace TypeBridgeApp
 
         // ---------- 控件工厂 ----------
 
-        private static Border Card(string title, StackPanel body)
+        private static UIElement Card(string title, StackPanel body)
         {
             body.Children.Add(new TextBlock
             {
                 Text = title,
-                FontSize = 13.5,
+                FontSize = 14,
                 FontWeight = FontWeights.Bold,
                 Foreground = new SolidColorBrush(Color.FromRgb(52, 66, 92)),
                 Margin = new Thickness(0, 0, 0, 12)
             });
 
-            return new Border
+            Grid host = new Grid { Margin = new Thickness(0, 0, 0, 10) };
+            Border shadowLayer = new Border
+            {
+                CornerRadius = new CornerRadius(14),
+                Background = Brushes.White,
+                Effect = Shadow(18, 3, 0.08)
+            };
+            Border card = new Border
             {
                 CornerRadius = new CornerRadius(14),
                 Background = Brushes.White,
                 BorderThickness = new Thickness(1),
                 BorderBrush = new SolidColorBrush(Line),
                 Padding = new Thickness(16, 12, 16, 14),
-                Margin = new Thickness(0, 0, 0, 10),
-                Effect = Shadow(18, 3, 0.08),
                 Child = body
             };
+            host.Children.Add(shadowLayer);
+            host.Children.Add(card);
+            return host;
         }
 
         private static TextBlock Label(string text)
@@ -474,7 +598,7 @@ namespace TypeBridgeApp
             return new TextBlock
             {
                 Text = text,
-                FontSize = 12.5,
+                FontSize = 13,
                 Foreground = new SolidColorBrush(Sub),
                 Margin = new Thickness(0, 0, 0, 6)
             };
@@ -485,8 +609,8 @@ namespace TypeBridgeApp
             return new TextBlock
             {
                 Text = text,
-                FontSize = 11.8,
-                Foreground = new SolidColorBrush(Color.FromRgb(140, 152, 172)),
+                FontSize = 12,
+                Foreground = new SolidColorBrush(Color.FromRgb(100, 116, 139)),
                 Margin = new Thickness(0, 10, 0, 0),
                 TextWrapping = TextWrapping.Wrap
             };
@@ -504,7 +628,7 @@ namespace TypeBridgeApp
             };
             box.BorderThickness = new Thickness(0);
             box.Background = Brushes.Transparent;
-            box.FontSize = 14.5;
+            box.FontSize = 14;
             box.Foreground = new SolidColorBrush(Ink);
             box.VerticalContentAlignment = VerticalAlignment.Center;
             frame.Child = box;
@@ -520,7 +644,7 @@ namespace TypeBridgeApp
             TextBlock text = new TextBlock
             {
                 Text = label,
-                FontSize = 13.5,
+                FontSize = 14,
                 Foreground = new SolidColorBrush(Color.FromRgb(52, 66, 92)),
                 VerticalAlignment = VerticalAlignment.Center
             };
@@ -537,7 +661,7 @@ namespace TypeBridgeApp
                 Content = text,
                 Height = 38,
                 Padding = new Thickness(16, 0, 16, 0),
-                FontSize = 12.5,
+                FontSize = 13,
                 Cursor = Cursors.Hand,
                 Foreground = new SolidColorBrush(Color.FromRgb(58, 72, 96)),
                 Background = Brushes.White,
@@ -549,7 +673,7 @@ namespace TypeBridgeApp
             return button;
         }
 
-        private static ControlTemplate RoundButtonTemplate()
+        private static ControlTemplate RoundButtonTemplate(double contentMargin = 16)
         {
             FrameworkElementFactory border = new FrameworkElementFactory(typeof(Border));
             border.SetValue(Border.CornerRadiusProperty, new CornerRadius(9));
@@ -569,7 +693,7 @@ namespace TypeBridgeApp
             FrameworkElementFactory presenter = new FrameworkElementFactory(typeof(ContentPresenter));
             presenter.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
             presenter.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
-            presenter.SetValue(FrameworkElement.MarginProperty, new Thickness(16, 0, 16, 0));
+            presenter.SetValue(FrameworkElement.MarginProperty, new Thickness(contentMargin, 0, contentMargin, 0));
             border.AppendChild(presenter);
 
             return new ControlTemplate(typeof(Button)) { VisualTree = border };
@@ -583,6 +707,18 @@ namespace TypeBridgeApp
             style.Triggers.Add(hover);
             button.Style = style;
         }
+
+        /// <summary>标题栏按钮默认透明，靠悬停底色提示可点击。</summary>
+        private static void AddChromeButtonHover(Button button)
+        {
+            Style style = new Style(typeof(Button));
+            Trigger hover = new Trigger { Property = IsMouseOverProperty, Value = true };
+            hover.Setters.Add(new Setter(BackgroundProperty,
+                new SolidColorBrush(Color.FromRgb(226, 233, 245))));
+            style.Triggers.Add(hover);
+            button.Style = style;
+        }
+
         private static DropShadowEffect Shadow(double blur, double depth, double opacity)
         {
             return new DropShadowEffect
@@ -727,27 +863,40 @@ namespace TypeBridgeApp
         /// <summary>两块屏幕的摆放区，可拖动吸附。</summary>
         private sealed class ScreenArranger : Canvas
         {
-            private const double BoxW = 128;
-            private const double BoxH = 80;
-            private const double Gap = 36;
+            private const double BoxW = 132;    // 接近 16:10 的显示器比例
+            private const double BoxH = 82;
+            private const double Gap = 16;
+            private const double ShortH = 116;  // 左右排列：一块的高度 + 上下留白
+            private const double TallH = 196;   // 上下排列：两块 + 间隙 + 留白
 
             private readonly Border windows = MakeBox(true);
             private readonly Border ubuntu = MakeBox(false);
-            private string edge = "left";
+            private string edge = "right";
             private bool dragging;
             private Point origin;
             private Point start;
 
+            private double ViewWidth
+            {
+                get { return ActualWidth > 1 ? ActualWidth : 400; }
+            }
+
+            private double ViewHeight
+            {
+                get { return Height > 1 ? Height : ShortH; }
+            }
+
             internal string Edge
             {
                 get { return edge; }
-                set { edge = value; Arrange(false); }
+                set { edge = NormalizeEdge(value); Arrange(); }
             }
 
             internal ScreenArranger()
             {
-                Width = 470;
-                Height = 148;
+                Height = ShortH;
+                MinWidth = 300;
+                HorizontalAlignment = HorizontalAlignment.Stretch;
                 Background = Brushes.Transparent;
                 ClipToBounds = true;
 
@@ -766,8 +915,8 @@ namespace TypeBridgeApp
                 {
                     if (!dragging) return;
                     Point now = e.GetPosition(this);
-                    SetLeft(ubuntu, Clamp(origin.X + (now.X - start.X), 4, Width - BoxW - 4));
-                    SetTop(ubuntu, Clamp(origin.Y + (now.Y - start.Y), 4, Height - BoxH - 4));
+                    SetLeft(ubuntu, Clamp(origin.X + (now.X - start.X), 4, ViewWidth - BoxW - 4));
+                    SetTop(ubuntu, Clamp(origin.Y + (now.Y - start.Y), 4, ViewHeight - BoxH - 4));
                 };
                 ubuntu.MouseLeftButtonUp += delegate
                 {
@@ -777,11 +926,26 @@ namespace TypeBridgeApp
                     Snap();
                 };
 
-                Arrange(true);
+                // 窗口宽度被拖动后重新居中，不再有固定 470 的画布撑破卡片
+                SizeChanged += delegate(object s, SizeChangedEventArgs e)
+                {
+                    if (e.WidthChanged) Arrange();
+                };
+                Arrange();
+            }
+
+            // Canvas 默认不按子元素计算尺寸；不覆写的话去掉固定 Width 后会被父容器压成 0 宽。
+            // 但必须先让基类测量两个方块，否则子元素 DesiredSize 为 0，安排出来就是 0×0（看不见）。
+            protected override Size MeasureOverride(Size constraint)
+            {
+                base.MeasureOverride(constraint);
+                double width = double.IsInfinity(constraint.Width) ? 400 : constraint.Width;
+                return new Size(Math.Max(width, BoxW * 2 + Gap + 12), ViewHeight);
             }
 
             private static double Clamp(double value, double min, double max)
             {
+                if (max < min) max = min;
                 return value < min ? min : (value > max ? max : value);
             }
 
@@ -797,37 +961,46 @@ namespace TypeBridgeApp
                     edge = dx < 0 ? "left" : "right";
                 else
                     edge = dy < 0 ? "top" : "bottom";
-                Arrange(true);
+                Arrange();
             }
 
-            private void Arrange(bool animate)
+            private void Arrange()
             {
-                double centerX = (Width - BoxW) / 2;
-                double centerY = (Height - BoxH) / 2;
+                // 只在上下排列时才把画布撑高，左右排列保持紧凑的正常比例
+                double targetH = (edge == "top" || edge == "bottom") ? TallH : ShortH;
+                if (Math.Abs(Height - targetH) > 0.5) Height = targetH;
 
-                double winX = centerX, winY = centerY;
-                double ubuX = centerX, ubuY = centerY;
+                double w = ViewWidth;
+                double h = ViewHeight;
+                double pairW = BoxW * 2 + Gap;
+                double pairH = BoxH * 2 + Gap;
+                double pairX = (w - pairW) / 2;
+                double pairY = (h - pairH) / 2;
+
+                double winX = (w - BoxW) / 2, winY = (h - BoxH) / 2;
+                double ubuX = winX, ubuY = winY;
 
                 switch (edge)
                 {
-                    case "left": ubuX = winX - BoxW - Gap; break;
-                    case "right": ubuX = winX + BoxW + Gap; break;
-                    case "top": ubuY = winY - BoxH - Gap; break;
-                    default: ubuY = winY + BoxH + Gap; break;
+                    case "left":
+                        ubuX = pairX; winX = pairX + BoxW + Gap; break;
+                    case "right":
+                        winX = pairX; ubuX = pairX + BoxW + Gap; break;
+                    case "top":
+                        winX = ubuX = (w - BoxW) / 2;
+                        ubuY = pairY; winY = pairY + BoxH + Gap; break;
+                    default:
+                        winX = ubuX = (w - BoxW) / 2;
+                        winY = pairY; ubuY = pairY + BoxH + Gap; break;
                 }
 
-                // 画布放不下时整体平移，保证两块都在视野内
+                // 窗口被拖窄到放不下两块时整体平移；左右、上下都夹在画布内
                 double minX = Math.Min(winX, ubuX);
                 double minY = Math.Min(winY, ubuY);
-                double shiftX = minX < 6 ? 6 - minX : 0;
-                double shiftY = minY < 6 ? 6 - minY : 0;
-
-                if (!animate)
-                {
-                    SetLeft(windows, winX + shiftX); SetTop(windows, winY + shiftY);
-                    SetLeft(ubuntu, ubuX + shiftX); SetTop(ubuntu, ubuY + shiftY);
-                    return;
-                }
+                double maxX = Math.Max(winX, ubuX) + BoxW;
+                double maxY = Math.Max(winY, ubuY) + BoxH;
+                double shiftX = minX < 4 ? 4 - minX : (maxX > w - 4 ? w - 4 - maxX : 0);
+                double shiftY = minY < 4 ? 4 - minY : (maxY > h - 4 ? h - 4 - maxY : 0);
 
                 SetLeft(windows, winX + shiftX); SetTop(windows, winY + shiftY);
                 SetLeft(ubuntu, ubuX + shiftX); SetTop(ubuntu, ubuY + shiftY);
@@ -855,7 +1028,7 @@ namespace TypeBridgeApp
                 content.Children.Add(new TextBlock
                 {
                     Text = isWindows ? "Windows" : "Ubuntu",
-                    FontSize = 11.5,
+                    FontSize = 12,
                     Margin = new Thickness(0, 4, 0, 0),
                     Foreground = Brushes.White,
                     HorizontalAlignment = HorizontalAlignment.Center
@@ -868,8 +1041,7 @@ namespace TypeBridgeApp
                     CornerRadius = new CornerRadius(10),
                     Background = background,
                     Child = content,
-                    Cursor = isWindows ? Cursors.Arrow : Cursors.SizeAll,
-                    Effect = Shadow(12, 2, 0.22)
+                    Cursor = isWindows ? Cursors.Arrow : Cursors.SizeAll
                 };
             }
         }
