@@ -34,18 +34,21 @@ jobs:
           }
           $xaml = Get-ChildItem -Path "$env:WINDIR\Microsoft.NET\assembly\GAC_MSIL\System.Xaml" -Filter "System.Xaml.dll" -Recurse -ErrorAction SilentlyContinue |
             Select-Object -First 1 -ExpandProperty FullName
-          & $csc /nologo /target:winexe /platform:anycpu /optimize+ /codepage:65001 `
-            /win32icon:"assets\typebridge.ico" `
-            /out:"TypeBridge.exe" `
-            /reference:System.dll `
-            /reference:System.Drawing.dll `
-            /reference:System.Windows.Forms.dll `
-            /reference:System.Web.Extensions.dll `
-            /reference:"$wpf\PresentationFramework.dll" `
-            /reference:"$wpf\PresentationCore.dll" `
-            /reference:"$wpf\WindowsBase.dll" `
-            $(if ($xaml) { "/reference:`"$xaml`"" }) `
-            "TypeBridge.cs" "WpfSettings.cs"
+          $cscArgs = @(
+            "/nologo", "/target:winexe", "/platform:anycpu", "/optimize+", "/codepage:65001",
+            "/win32icon:assets\typebridge.ico",
+            "/out:TypeBridge.exe",
+            "/reference:System.dll",
+            "/reference:System.Drawing.dll",
+            "/reference:System.Windows.Forms.dll",
+            "/reference:System.Web.Extensions.dll",
+            "/reference:$(Join-Path $wpf 'PresentationFramework.dll')",
+            "/reference:$(Join-Path $wpf 'PresentationCore.dll')",
+            "/reference:$(Join-Path $wpf 'WindowsBase.dll')"
+          )
+          if ($xaml) { $cscArgs += "/reference:$xaml" }
+          $cscArgs += @("TypeBridge.cs", "WpfSettings.cs")
+          & $csc @cscArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-Item "TypeBridge.exe" | Select-Object FullName, Length
 
