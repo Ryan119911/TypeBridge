@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.5.2.0")]
+[assembly: AssemblyVersion("3.5.3.0")]
 
 namespace TypeBridgeApp
 {
@@ -3041,6 +3041,22 @@ namespace TypeBridgeApp
                     mouseHook.RemoteWidth = width;
                     mouseHook.RemoteHeight = height;
                 }
+                return;
+            }
+
+            if (line == "BT")
+            {
+                // Ubuntu 端托盘里点了「切回 Windows」
+                Log.Write("switch back requested by ubuntu tray");
+                try
+                {
+                    hotkeyForm.BeginInvoke(new Action(delegate
+                    {
+                        SetKeyboardMode(false, true);
+                        SetMouseMode(false, true);
+                    }));
+                }
+                catch { }
                 return;
             }
 

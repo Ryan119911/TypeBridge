@@ -38,6 +38,7 @@ Ubuntu 安装包会创建应用菜单入口和开机自启的 systemd 用户服�
 - **组合键**：Ctrl/Alt/Win + 字母、数字、功能键，例如 `Ctrl+A`、`Alt+B`、`Win+E`。
 - **独立配置**：首次运行填入自己的 Ubuntu IP 和端口，保存在本地 `typebridge.ini`。
 - **低依赖**：Windows 端使用系统自带 .NET Framework；Ubuntu 端只需要 Python 3、GTK、xdotool 和可用的 X11 输入法。
+- **Ubuntu 顶栏标志**：守护进程在后台跑时，桌面顶栏有一个 TypeBridge 图标（AppIndicator，没有则回退 `Gtk.StatusIcon`），点开能看到连接状态、一键「切回 Windows」、打开设置、重启/停止服务。
 - **Ubuntu 图形设置页**：`.deb` 安装后从应用菜单打开，可查看服务状态、显示本机 IP、复制地址、修改端口和启停服务。
 - **单实例**：重复启动会自动退出第二个实例，避免重复键盘钩子。
 
@@ -328,6 +329,7 @@ Windows 端使用低级键盘与鼠标钩子：
 | `PING` | 连通性测试，返回 `PONG` |
 | `QUIT` | 断开连接 |
 | `C <json字符串>` | 写对端剪贴板（文本，双向都用） |
+| `BT` | Ubuntu 端通知 Windows 切回本机（托盘菜单"切回 Windows"，Ubuntu -> Windows） |
 | `CLIPIMG <字节数> <文件名>` | 走文件通道传一张 PNG 图片并写进对端剪贴板（双向都用，不落盘） |
 
 `K` 键名和 `B` 按钮编号都使用白名单校验，未知值会被拒绝并记录日志。旧客户端只发送 `BackSpace` 和 `Return` 时仍然兼容。
@@ -370,7 +372,7 @@ Windows 端使用低级键盘与鼠标钩子：
 在 Ubuntu 上执行：
 
 ```bash
-VERSION=3.5.2 bash ubuntu/build-deb.sh
+VERSION=3.5.3 bash ubuntu/build-deb.sh
 ```
 
 生成：

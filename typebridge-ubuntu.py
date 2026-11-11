@@ -14,6 +14,7 @@ TypeBridge Ubuntu 端守护进程（单线程 GLib 事件循环版）
   PING              应答 PONG
   QUIT              断开
   C <json字符串>    写本机剪贴板（文本，Windows -> Ubuntu）
+  BT                通知 Windows 端"切回本机"（Ubuntu 托盘菜单用，Ubuntu -> Windows）
 
 文件通道（默认 4322/4323，独立连接，一行头 + 原始字节）:
   UPLOAD <字节数> <文件名>   收文件并落盘
@@ -29,6 +30,7 @@ import faulthandler
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import threading
@@ -603,11 +605,14 @@ _seq = {"clip": 0}
 
 def broadcast(line):
     data = (line + "\n").encode("utf-8")
+    sent = 0
     for st in list(CONNS.values()):
         try:
             st["sock"].sendall(data)
+            sent += 1
         except OSError:
             pass
+    return sent
 
 
 def set_clipboard(text):
@@ -762,6 +767,163 @@ def watch_clipboard():
         log("clipboard watch failed: %r" % (e,))
 
 
+# ---------- 托盘指示器：后台跑着也要看得见、点得到 ----------
+
+_tray = {"indicator": None, "fallback": False}
+
+
+def _tray_icon_name():
+    try:
+        if Gtk.IconTheme.get_default().has_icon("typebridge"):
+            return "typebridge"
+    except Exception:
+        pass
+    # 没装图标包时用主题自带图标：连着用键盘图标，没连用离线图标
+    return "input-keyboard-symbolic" if CONNS else "network-offline-symbolic"
+
+
+def _tray_tooltip():
+    return "TypeBridge：Windows 已连接" if CONNS else "TypeBridge：等待 Windows 连接"
+
+
+def _tray_notify(title, body):
+    try:
+        subprocess.Popen(["notify-send", "-a", "TypeBridge", "-i", "input-keyboard", title, body],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        log("%s: %s" % (title, body))
+
+
+def _systemctl_user(action):
+    try:
+        subprocess.Popen(["systemctl", "--user", action, "typebridge"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log("tray: systemctl --user %s typebridge" % action)
+    except Exception as e:
+        log("tray: systemctl failed: %r" % (e,))
+
+
+def settings_command():
+    """设置页可能在 ~/.local/bin（源码安装），也可能在 /usr/bin（deb 安装）。"""
+    for candidate in ("typebridge-ui", "/usr/bin/typebridge-ui",
+                      os.path.expanduser("~/.local/bin/typebridge-ui"),
+                      os.path.expanduser("~/.local/bin/typebridge-ui.py"),
+                      "/usr/lib/typebridge/typebridge-ui.py"):
+        found = candidate if os.path.isabs(candidate) else shutil.which(candidate)
+        if found and os.path.exists(found):
+            if found.endswith(".py"):
+                return ["/usr/bin/python3", found]
+            return [found]
+    return None
+
+
+def _tray_open_settings(_item=None):
+    cmd = settings_command()
+    if not cmd:
+        log("tray: 找不到设置页")
+        _tray_notify("没有找到设置页", "请把 typebridge-ui 放到 PATH 里，或安装 deb 包")
+        return
+    try:
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+        log("tray: 打开设置 %s" % " ".join(cmd))
+    except Exception as e:
+        log("tray: 打开设置失败: %r" % (e,))
+
+
+def _tray_switch_back(_item=None):
+    sent = broadcast("BT")
+    log("tray: 请求切回 Windows（发给 %d 个连接）" % sent)
+    if not sent:
+        _tray_notify("还没连上 Windows", "等 Windows 端连上以后再点")
+
+
+def _build_tray_menu():
+    menu = Gtk.Menu()
+
+    status = Gtk.MenuItem(label="Windows 已连接" if CONNS else "等待 Windows 连接")
+    status.set_sensitive(False)
+    menu.append(status)
+
+    switch = Gtk.MenuItem(label="切回 Windows")
+    switch.set_sensitive(bool(CONNS))
+    switch.connect("activate", _tray_switch_back)
+    menu.append(switch)
+
+    menu.append(Gtk.SeparatorMenuItem())
+
+    settings = Gtk.MenuItem(label="打开设置…")
+    settings.connect("activate", _tray_open_settings)
+    menu.append(settings)
+
+    restart = Gtk.MenuItem(label="重启服务")
+    restart.connect("activate", lambda *_: _systemctl_user("restart"))
+    menu.append(restart)
+
+    stop = Gtk.MenuItem(label="停止服务")
+    stop.connect("activate", lambda *_: _systemctl_user("stop"))
+    menu.append(stop)
+
+    menu.show_all()
+    return menu
+
+
+def _on_status_icon_popup(icon, button, activate_time):
+    # 回退模式（Gtk.StatusIcon）每次点开都重建菜单，状态才是新的
+    menu = _build_tray_menu()
+    menu.popup(None, None, Gtk.StatusIcon.position_menu, icon, button, activate_time)
+
+
+def start_tray():
+    """在桌面顶栏放一个 TypeBridge 标志；没有托盘宿主就只记日志，不影响转发。"""
+    menu = _build_tray_menu()
+
+    for module_name in ("AyatanaAppIndicator3", "AppIndicator3"):
+        try:
+            gi.require_version(module_name, "0.1")
+            module = __import__("gi.repository", fromlist=[module_name])
+            api = getattr(module, module_name)
+            indicator = api.Indicator.new("typebridge", _tray_icon_name(),
+                                          api.IndicatorCategory.APPLICATION_STATUS)
+            indicator.set_status(api.IndicatorStatus.ACTIVE)
+            indicator.set_title("TypeBridge")
+            indicator.set_menu(menu)
+            _tray["indicator"] = indicator
+            _tray["fallback"] = False
+            log("tray: 已用 %s 显示顶栏图标" % module_name)
+            return
+        except Exception as e:
+            log("tray: %s 不可用（%r）" % (module_name, e))
+
+    try:
+        icon = Gtk.StatusIcon()
+        icon.set_from_icon_name(_tray_icon_name())
+        icon.set_tooltip_text(_tray_tooltip())
+        icon.connect("popup-menu", _on_status_icon_popup)
+        icon.set_visible(True)
+        _tray["indicator"] = icon
+        _tray["fallback"] = True
+        log("tray: 回退到 Gtk.StatusIcon")
+    except Exception as e:
+        _tray["indicator"] = None
+        log("tray: 没有可用的托盘宿主（%r），只在日志里报告状态" % (e,))
+
+
+def refresh_tray():
+    indicator = _tray["indicator"]
+    if indicator is None:
+        return
+    try:
+        if _tray["fallback"]:
+            indicator.set_from_icon_name(_tray_icon_name())
+            indicator.set_tooltip_text(_tray_tooltip())
+        else:
+            indicator.set_icon_full(_tray_icon_name(), _tray_tooltip())
+            indicator.set_menu(_build_tray_menu())
+    except Exception as e:
+        log("tray refresh failed: %r" % (e,))
+
+
 def handle_line(line, sock):
     """返回 False 表示对端请求断开(QUIT)"""
     if line == "PING":
@@ -873,6 +1035,7 @@ def on_accept(fd, cond):
     conn.setblocking(False)
     st = {"sock": conn, "addr": addr, "buf": b""}
     CONNS[conn.fileno()] = st
+    refresh_tray()
     log("client connected: %s:%s" % (addr[0], addr[1]))
     src = GLib.io_add_watch(conn.fileno(),
                             GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR,
@@ -911,6 +1074,7 @@ def drop(fd, msg):
         except OSError:
             pass
         release_mouse_buttons("disconnect")
+        refresh_tray()
     log(msg)
     return False
 
@@ -1165,6 +1329,7 @@ def main():
     GLib.io_add_watch(srv.fileno(), GLib.IO_IN, on_accept)
     watch_clipboard()
     start_file_server()
+    start_tray()
     try:
         os.makedirs(outbox_dir(), exist_ok=True)
         GLib.timeout_add_seconds(2, scan_outbox)
