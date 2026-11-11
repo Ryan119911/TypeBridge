@@ -3052,6 +3052,14 @@ namespace TypeBridgeApp
                 }
 
                 string directory = ResolveRecvDir();
+                // 目标目录（如 下载\typebridge）可能不存在，写 .part 前先建好，
+                // 否则 FileStream 抛 DirectoryNotFoundException，发送端只会收到 ERR
+                try { System.IO.Directory.CreateDirectory(directory); }
+                catch (Exception ex)
+                {
+                    SendAscii(source, "ERR " + ex.Message);
+                    return;
+                }
 
                 string name = SafeFileName(parts[2]);
                 string dest = System.IO.Path.Combine(directory, name);
