@@ -386,7 +386,7 @@ Windows 端使用低级键盘与鼠标钩子：
 在 Ubuntu 上执行：
 
 ```bash
-VERSION=3.5.13 bash ubuntu/build-deb.sh
+VERSION=3.5.14 bash ubuntu/build-deb.sh
 ```
 
 生成：
