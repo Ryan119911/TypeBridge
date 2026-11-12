@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.5.5.0")]
+[assembly: AssemblyVersion("3.5.6.0")]
 
 namespace TypeBridgeApp
 {
@@ -34,6 +34,14 @@ namespace TypeBridgeApp
         {
             try
             {
+                string[] commandLine = Environment.GetCommandLineArgs();
+                if (commandLine.Length >= 3 && commandLine[1] == "--send")
+                {
+                    // 命令行发文件：给脚本/自动化留的口子，也方便不碰托盘直接传
+                    RunCliSend(commandLine);
+                    return;
+                }
+
                 Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
                 Application.ThreadException += delegate(object sender, System.Threading.ThreadExceptionEventArgs e)
                 {
@@ -76,6 +84,87 @@ namespace TypeBridgeApp
             {
                 try { timeEndPeriod(1); } catch { }
             }
+        }
+
+        /// <summary>
+        /// 命令行发文件：TypeBridge.exe --send &lt;文件&gt; [更多文件…]
+        /// 给脚本留的口子，也方便不点托盘直接传（不影响正在运行的托盘实例）。
+        /// </summary>
+        private static void RunCliSend(string[] args)
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+
+            string ip = "127.0.0.1";
+            int port = 4322;
+            try
+            {
+                string ini = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "typebridge.ini");
+                if (System.IO.File.Exists(ini))
+                {
+                    foreach (string raw in System.IO.File.ReadAllLines(ini))
+                    {
+                        int eq = raw.IndexOf('=');
+                        if (eq <= 0)
+                            continue;
+                        string key = raw.Substring(0, eq).Trim().ToLowerInvariant();
+                        string value = raw.Substring(eq + 1).Trim();
+                        if (key == "ip" && value.Length > 0)
+                            ip = value;
+                        else if (key == "file_port")
+                            int.TryParse(value, out port);
+                    }
+                }
+            }
+            catch { }
+
+            string[] files = new string[args.Length - 2];
+            Array.Copy(args, 2, files, 0, files.Length);
+
+            int ok = 0;
+            string lastDestination = null;
+            string firstProblem = null;
+            TransferProgressForm progress = new TransferProgressForm();
+
+            progress.Shown += delegate
+            {
+                System.Threading.ThreadPool.QueueUserWorkItem(delegate
+                {
+                    foreach (string file in files)
+                    {
+                        if (progress.CancelRequested)
+                            break;
+                        string error;
+                        string destination;
+                        if (FileSender.Upload(ip, port, file, progress, out error, out destination))
+                        {
+                            ok++;
+                            if (destination != null)
+                                lastDestination = destination;
+                        }
+                        else if (firstProblem == null)
+                        {
+                            firstProblem = System.IO.Path.GetFileName(file) + "：" + (error ?? "发送失败");
+                        }
+                    }
+
+                    string message = "已发送 " + ok + " / " + files.Length + " 个文件到 Ubuntu";
+                    if (ok > 0 && lastDestination != null)
+                        message += " → " + lastDestination;
+                    if (firstProblem != null)
+                        message += "（" + firstProblem + "）";
+                    Log.Write("cli send: " + message);
+
+                    progress.Finish(message, false);
+                    System.Threading.Thread.Sleep(1500);
+                    try { progress.BeginInvoke(new Action(delegate { progress.Close(); })); }
+                    catch { }
+                });
+            };
+
+            progress.BeginTransfer();
+            Application.Run(progress);
+            Environment.ExitCode = (ok == files.Length && firstProblem == null) ? 0 : 1;
         }
 
         private static void LogException(Exception ex)
@@ -1848,6 +1937,371 @@ namespace TypeBridgeApp
         }
     }
 
+    /// <summary>
+    /// 传文件的进度窗口：文件名、百分比、速度、剩余时间，可取消。
+    /// 大文件不显示进度会让人以为卡死，这个窗口就是给"还在动"一个答案。
+    /// </summary>
+    internal sealed class TransferProgressForm : Form
+    {
+        private readonly Label titleLabel = new Label();
+        private readonly Label percentLabel = new Label();
+        private readonly Label detailLabel = new Label();
+        private readonly Button cancelButton = new Button();
+        internal volatile bool CancelRequested;
+
+        private long totalBytes;
+        private long sentBytes;
+        private string fileName = string.Empty;
+        private DateTime startedUtc;
+        private long lastReportTick;
+        private double lastRate;
+        private bool finished;
+
+        internal TransferProgressForm()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+            ClientSize = new Size(UiScale.S(400), UiScale.S(118));
+            BackColor = Color.FromArgb(30, 30, 30);
+            Opacity = 0.97;
+            DoubleBuffered = true;
+
+            titleLabel.AutoSize = false;
+            titleLabel.SetBounds(UiScale.S(16), UiScale.S(10), UiScale.S(300), UiScale.S(20));
+            titleLabel.ForeColor = Color.Silver;
+            titleLabel.Font = new Font("Microsoft YaHei", 9F);
+            titleLabel.Text = "发送到 Ubuntu";
+
+            percentLabel.AutoSize = false;
+            percentLabel.SetBounds(UiScale.S(16), UiScale.S(30), UiScale.S(300), UiScale.S(20));
+            percentLabel.ForeColor = Color.White;
+            percentLabel.Font = new Font("Microsoft YaHei", 10F, FontStyle.Bold);
+            percentLabel.Text = "0%";
+
+            detailLabel.AutoSize = false;
+            detailLabel.SetBounds(UiScale.S(16), UiScale.S(52), UiScale.S(368), UiScale.S(34));
+            detailLabel.ForeColor = Color.Silver;
+            detailLabel.Font = new Font("Microsoft YaHei", 8.5F);
+            detailLabel.AutoEllipsis = true;
+
+            cancelButton.SetBounds(UiScale.S(322), UiScale.S(8), UiScale.S(62), UiScale.S(26));
+            cancelButton.Text = "取消";
+            cancelButton.FlatStyle = FlatStyle.Flat;
+            cancelButton.FlatAppearance.BorderSize = 1;
+            cancelButton.FlatAppearance.BorderColor = Color.FromArgb(90, 90, 90);
+            cancelButton.BackColor = Color.FromArgb(45, 45, 45);
+            cancelButton.ForeColor = Color.Gainsboro;
+            cancelButton.TabStop = false;
+            cancelButton.Click += delegate
+            {
+                CancelRequested = true;
+                cancelButton.Enabled = false;
+                detailLabel.Text = "正在取消…";
+            };
+
+            Controls.Add(titleLabel);
+            Controls.Add(percentLabel);
+            Controls.Add(detailLabel);
+            Controls.Add(cancelButton);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            Rectangle bar = new Rectangle(UiScale.S(16), UiScale.S(94),
+                ClientSize.Width - UiScale.S(32), UiScale.S(8));
+            using (GraphicsPath track = Glass.Rounded(bar, UiScale.S(4)))
+            {
+                using (Brush fill = new SolidBrush(Color.FromArgb(58, 58, 58)))
+                    e.Graphics.FillPath(fill, track);
+            }
+
+            double ratio = totalBytes <= 0 ? 0 : Math.Min(1.0, (double)sentBytes / totalBytes);
+            int width = (int)(bar.Width * ratio);
+            if (width > 0)
+            {
+                Rectangle done = new Rectangle(bar.X, bar.Y, Math.Max(width, UiScale.S(6)), bar.Height);
+                using (GraphicsPath path = Glass.Rounded(done, UiScale.S(4)))
+                {
+                    using (LinearGradientBrush brush = new LinearGradientBrush(
+                        new Rectangle(done.X, done.Y, Math.Max(done.Width, 2), done.Height),
+                        Color.FromArgb(96, 176, 255), Color.FromArgb(64, 138, 240), 0f))
+                    {
+                        e.Graphics.FillPath(brush, path);
+                    }
+                }
+            }
+        }
+
+        protected override bool ShowWithoutActivation
+        {
+            get { return true; }
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                // 不能抢焦点：传大文件时用户可能还在打字
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE
+                cp.ExStyle |= 0x00000080; // WS_EX_TOOLWINDOW
+                return cp;
+            }
+        }
+
+        private static string FormatBytes(long bytes)
+        {
+            if (bytes < 1024)
+                return bytes + " B";
+            if (bytes < 1024L * 1024)
+                return (bytes / 1024.0).ToString("0.0") + " KB";
+            if (bytes < 1024L * 1024 * 1024)
+                return (bytes / 1048576.0).ToString("0.0") + " MB";
+            return (bytes / 1073741824.0).ToString("0.00") + " GB";
+        }
+
+        internal void BeginTransfer()
+        {
+            CancelRequested = false;
+            finished = false;
+            fileName = string.Empty;
+            totalBytes = 0;
+            sentBytes = 0;
+            lastRate = 0;
+            lastReportTick = 0;
+            startedUtc = DateTime.UtcNow;
+            cancelButton.Enabled = true;
+            percentLabel.Text = "准备中…";
+            detailLabel.Text = string.Empty;
+            titleLabel.Text = "发送到 Ubuntu";
+            Invalidate();
+
+            Rectangle workArea = Screen.FromPoint(Cursor.Position).WorkingArea;
+            // 比气泡高一点，避免结果气泡盖住进度
+            Location = new Point(
+                workArea.Right - Width - UiScale.S(24),
+                workArea.Bottom - Height - UiScale.S(120));
+            if (!Visible)
+                Show();
+            BringToFront();
+        }
+
+        /// <summary>工作线程里调用；内部做线程切换与节流。</summary>
+        internal void Report(string name, long sent, long total)
+        {
+            if (finished)
+                return;
+            long now = Environment.TickCount;
+            if (sent < total && lastReportTick != 0 && now - lastReportTick < 90)
+                return;
+            lastReportTick = now;
+
+            if (IsDisposed)
+                return;
+            if (InvokeRequired)
+            {
+                try { BeginInvoke(new Action(delegate { Report(name, sent, total); })); }
+                catch { }
+                return;
+            }
+
+            fileName = name;
+            totalBytes = total;
+            sentBytes = sent;
+
+            double seconds = Math.Max(0.001, (DateTime.UtcNow - startedUtc).TotalSeconds);
+            double rate = sent / seconds;
+            if (rate > 0)
+                lastRate = rate;
+
+            int percent = total <= 0 ? 0 : (int)Math.Min(100, sent * 100 / total);
+            percentLabel.Text = percent + "%　" + FormatBytes(sent) + " / " + FormatBytes(total);
+
+            string remaining = "—";
+            string speed = "—";
+            // 共耗时太短时算出来的速率没意义（会显示成几十 GB/s），先按住不显示
+            if (seconds > 0.8 && lastRate > 0)
+            {
+                speed = FormatBytes((long)lastRate) + "/s";
+                if (total > sent)
+                {
+                    double left = (total - sent) / lastRate;
+                    if (left < 3600)
+                        remaining = TimeSpan.FromSeconds((int)left).ToString(@"mm\:ss");
+                }
+                else
+                {
+                    remaining = "00:00";
+                }
+            }
+            detailLabel.Text = name + "\r\n" + speed + "　剩余 " + remaining;
+            Invalidate();
+        }
+
+        internal void Finish(string message, bool keepVisible)
+        {
+            finished = true;
+            if (IsDisposed)
+                return;
+            if (InvokeRequired)
+            {
+                try { BeginInvoke(new Action(delegate { Finish(message, keepVisible); })); }
+                catch { }
+                return;
+            }
+
+            percentLabel.Text = message;
+            detailLabel.Text = string.Empty;
+            cancelButton.Visible = false;
+            Invalidate();
+
+            if (!keepVisible)
+            {
+                Timer hide = new Timer();
+                hide.Interval = 1600;
+                hide.Tick += delegate
+                {
+                    hide.Stop();
+                    hide.Dispose();
+                    Hide();
+                };
+                hide.Start();
+            }
+        }
+    }
+
+    internal static class FileSender
+    {
+        /// <summary>把文件推给 Ubuntu 的文件端口，顺带回调进度。UI 和命令行共用这一份实现。</summary>
+        internal static bool Upload(string ip, int port, string path, TransferProgressForm progress,
+                                    out string error, out string destination)
+        {
+            error = null;
+            destination = null;
+            TcpClient socket = null;
+            try
+            {
+                FileInfo info = new FileInfo(path);
+                if (!info.Exists)
+                {
+                    error = "文件不存在";
+                    return false;
+                }
+
+                socket = new TcpClient();
+                socket.NoDelay = true;
+                // 大文件传输最怕默默挂死：写超过 60 秒没有进展就判死，让上层拿到明确的错误
+                socket.SendTimeout = 60000;
+                if (!socket.ConnectAsync(ip, port).Wait(4000))
+                {
+                    error = "连不上文件端口 " + port;
+                    Log.Write("send file failed: " + info.Name + " " + error);
+                    return false;
+                }
+
+                Log.Write("send file: " + info.Name + " (" + info.Length + " bytes) -> "
+                    + ip + ":" + port);
+                NetworkStream target = socket.GetStream();
+                byte[] head = Encoding.UTF8.GetBytes("UPLOAD " + info.Length + " " + info.Name + "\n");
+                target.Write(head, 0, head.Length);
+
+                byte[] buffer = new byte[262144];
+                long sent = 0;
+                using (FileStream input = new FileStream(path, FileMode.Open, FileAccess.Read,
+                    FileShare.Read, 262144, FileOptions.SequentialScan))
+                {
+                    int read;
+                    while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+                    {
+                        if (progress != null && progress.CancelRequested)
+                        {
+                            error = "已取消";
+                            Log.Write("send file cancelled: " + info.Name + " at "
+                                + sent + "/" + info.Length + " bytes");
+                            return false;
+                        }
+                        target.Write(buffer, 0, read);
+                        sent += read;
+                        if (progress != null)
+                            progress.Report(info.Name, sent, info.Length);
+                    }
+                }
+                target.Flush();
+
+                string reply = ReadReply(socket);
+                if (reply == null)
+                {
+                    error = "没有收到 Ubuntu 的确认";
+                    Log.Write("send file failed: " + info.Name + " " + error);
+                    return false;
+                }
+                if (!reply.StartsWith("OK"))
+                {
+                    error = reply;
+                    Log.Write("send file failed: " + info.Name + " " + reply);
+                    return false;
+                }
+                // 回复形如 "OK /home/robot/Desktop/x.txt"，把真实落地路径带回去
+                destination = reply.Substring(2).Trim();
+                Log.Write("sent file: " + info.Name + " (" + info.Length + " bytes) -> " + destination);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                Log.Write("send file failed: " + Path.GetFileName(path) + " " + ex.Message);
+                return false;
+            }
+            finally
+            {
+                if (socket != null)
+                {
+                    try { socket.Close(); }
+                    catch { }
+                }
+            }
+        }
+
+        internal static string ReadReply(TcpClient socket)
+        {
+            try
+            {
+                socket.ReceiveTimeout = 15000;
+                NetworkStream source = socket.GetStream();
+                List<byte> bytes = new List<byte>();
+                byte[] chunk = new byte[256];
+                while (bytes.Count < 4096)
+                {
+                    int count = source.Read(chunk, 0, chunk.Length);
+                    if (count <= 0)
+                        break;
+                    bool finished = false;
+                    for (int i = 0; i < count; i++)
+                    {
+                        if (chunk[i] == (byte)'\n')
+                        {
+                            finished = true;
+                            break;
+                        }
+                        bytes.Add(chunk[i]);
+                    }
+                    if (finished)
+                        break;
+                }
+                if (bytes.Count == 0)
+                    return null;
+                return Encoding.UTF8.GetString(bytes.ToArray()).TrimEnd('\r');
+            }
+            catch
+            {
+                return null;
+            }
+        }
+    }
+
     internal sealed class DropPadForm : Form
     {
         private readonly Action<string[]> onDrop;
@@ -3488,13 +3942,23 @@ namespace TypeBridgeApp
                 if (files.Length == 0)
                     return;
 
-                System.Threading.Thread worker = new System.Threading.Thread(delegate () { UploadFiles(files); });
-                worker.IsBackground = true;
-                worker.Start();
+                // 上传放到后台线程（UploadFiles 内部起线程），否则大文件会把 UI 和任务栏冻住
+                UploadFiles(files);
             }
         }
 
+        /// <summary>UI 线程入口：先建好进度窗口，再把真正的传输丢到后台。</summary>
         private void UploadFiles(string[] files)
+        {
+            TransferProgressForm progress = ProgressForm();
+            progress.BeginTransfer();
+            System.Threading.Thread worker = new System.Threading.Thread(
+                delegate () { UploadWorker(files, progress); });
+            worker.IsBackground = true;
+            worker.Start();
+        }
+
+        private void UploadWorker(string[] files, TransferProgressForm progress)
         {
             int ok = 0;
             string firstProblem = null;
@@ -3502,9 +3966,16 @@ namespace TypeBridgeApp
 
             foreach (string file in files)
             {
+                if (progress.CancelRequested)
+                {
+                    if (firstProblem == null)
+                        firstProblem = "已取消";
+                    break;
+                }
+
                 string error;
                 string destination;
-                if (UploadOne(file, out error, out destination))
+                if (UploadOne(file, progress, out error, out destination))
                 {
                     ok++;
                     if (destination != null)
@@ -3528,6 +3999,8 @@ namespace TypeBridgeApp
             if (firstProblem != null)
                 message += "（" + firstProblem + "）";
 
+            progress.Finish(message, false);
+
             try
             {
                 hotkeyForm.BeginInvoke(new Action(delegate
@@ -3539,135 +4012,24 @@ namespace TypeBridgeApp
             catch { }
         }
 
-        private bool UploadOne(string path, out string error, out string destination)
+        private TransferProgressForm progressForm;
+
+        private TransferProgressForm ProgressForm()
         {
-            error = null;
-            destination = null;
-            TcpClient socket = null;
-            try
-            {
-                FileInfo info = new FileInfo(path);
-                if (!info.Exists)
-                {
-                    error = "文件不存在";
-                    return false;
-                }
-
-                socket = new TcpClient();
-                socket.NoDelay = true;
-                if (!socket.ConnectAsync(ip, filePort).Wait(4000))
-                {
-                    error = "连不上文件端口 " + filePort;
-                    Log.Write("send file failed: " + info.Name + " " + error);
-                    return false;
-                }
-
-                Log.Write("send file: " + info.Name + " (" + info.Length + " bytes) -> "
-                    + ip + ":" + filePort);
-                NetworkStream target = socket.GetStream();
-                byte[] head = Encoding.UTF8.GetBytes("UPLOAD " + info.Length + " " + info.Name + "\n");
-                target.Write(head, 0, head.Length);
-
-                byte[] buffer = new byte[65536];
-                long sent = 0;
-                using (FileStream input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
-                {
-                    int read;
-                    while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
-                    {
-                        target.Write(buffer, 0, read);
-                        sent += read;
-                        ReportUploadProgress(info.Name, sent, info.Length);
-                    }
-                }
-                target.Flush();
-
-                string reply = ReadReply(socket);
-                if (reply == null)
-                {
-                    error = "没有收到 Ubuntu 的确认";
-                    Log.Write("send file failed: " + info.Name + " " + error);
-                    return false;
-                }
-                if (!reply.StartsWith("OK"))
-                {
-                    error = reply;
-                    Log.Write("send file failed: " + info.Name + " " + reply);
-                    return false;
-                }
-                // 回复形如 "OK /home/robot/Desktop/x.txt"，把真实落地路径带回去
-                destination = reply.Substring(2).Trim();
-                Log.Write("sent file: " + info.Name + " -> " + destination);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                error = ex.Message;
-                return false;
-            }
-            finally
-            {
-                if (socket != null)
-                {
-                    try { socket.Close(); }
-                    catch { }
-                }
-            }
+            if (progressForm == null || progressForm.IsDisposed)
+                progressForm = new TransferProgressForm();
+            return progressForm;
         }
 
-        private long lastUploadTick;
-
-        private void ReportUploadProgress(string name, long sent, long total)
+        private bool UploadOne(string path, TransferProgressForm progress,
+                               out string error, out string destination)
         {
-            long now = Environment.TickCount;
-            if (sent < total && now - lastUploadTick < 250)
-                return;
-            lastUploadTick = now;
-            int percent = total <= 0 ? 100 : (int)(sent * 100 / total);
-            try
-            {
-                hotkeyForm.BeginInvoke(new Action(delegate
-                {
-                    tray.Text = "发送 " + percent + "%｜" + name;
-                }));
-            }
-            catch { }
+            return FileSender.Upload(ip, filePort, path, progress, out error, out destination);
         }
 
         private static string ReadReply(TcpClient socket)
         {
-            try
-            {
-                socket.ReceiveTimeout = 15000;
-                NetworkStream source = socket.GetStream();
-                List<byte> bytes = new List<byte>();
-                byte[] chunk = new byte[256];
-                while (bytes.Count < 4096)
-                {
-                    int count = source.Read(chunk, 0, chunk.Length);
-                    if (count <= 0)
-                        break;
-                    bool finished = false;
-                    for (int i = 0; i < count; i++)
-                    {
-                        if (chunk[i] == (byte)'\n')
-                        {
-                            finished = true;
-                            break;
-                        }
-                        bytes.Add(chunk[i]);
-                    }
-                    if (finished)
-                        break;
-                }
-                if (bytes.Count == 0)
-                    return null;
-                return Encoding.UTF8.GetString(bytes.ToArray()).TrimEnd('\r');
-            }
-            catch
-            {
-                return null;
-            }
+            return FileSender.ReadReply(socket);
         }
 
         private void ConnectToServer()

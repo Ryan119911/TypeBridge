@@ -1254,7 +1254,7 @@ def resolve_file_dir(name=""):
 
 def handle_upload(conn, addr):
     try:
-        conn.settimeout(30)
+        conn.settimeout(120)  # 空闲 120s 才判死：大文件+慢链路别动不动断
         stream = conn.makefile("rb")
         header = stream.readline(4096).decode("utf-8", "replace").strip()
         parts = header.split(" ", 2)
@@ -1311,15 +1311,21 @@ def handle_upload(conn, addr):
         dest = unique_path(directory, name)
 
         received = 0
+        last_mark = 0
         started = time.time()
         temp_dest = dest + ".part"
         with open(temp_dest, "wb") as out:
             while received < size:
-                chunk = stream.read(min(1 << 16, size - received))
+                chunk = stream.read(min(1 << 18, size - received))
                 if not chunk:
                     break
                 out.write(chunk)
                 received += len(chunk)
+                # 大文件按 25% 打点，出问题能看出断在第几段
+                if size >= (64 << 20) and received - last_mark >= size // 4:
+                    last_mark = received
+                    log("file: %s %d%% (%d/%d MB)"
+                        % (name, received * 100 // size, received >> 20, size >> 20))
 
         if received != size:
             log("file: incomplete %s (%d/%d) from %s" % (name, received, size, addr[0]))
