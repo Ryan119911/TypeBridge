@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.5.9.0")]
+[assembly: AssemblyVersion("3.5.10.0")]
 
 namespace TypeBridgeApp
 {
@@ -1321,6 +1321,7 @@ namespace TypeBridgeApp
         private bool tracking;
         private bool edgeArmed = true;
         private int edgeHits;
+        private int edgeCooldownUntil;
         private int virtualX;
         private int virtualY;
         private string switchEdge = "right";
@@ -1652,6 +1653,9 @@ namespace TypeBridgeApp
                                     tracking = false;
                                     pendingDx = 0;
                                     pendingDy = 0;
+                                    // 刚回来的一小段时间不许再切走，否则鼠标在边缘上就是来回抖
+                                    edgeArmed = false;
+                                    edgeCooldownUntil = unchecked(Environment.TickCount + 400);
                                     EventHandler returned = EdgeReturned;
                                     if (returned != null)
                                     {
@@ -1778,9 +1782,16 @@ namespace TypeBridgeApp
 
         private bool AtSwitchEdge(int x, int y)
         {
+            if (unchecked(Environment.TickCount - edgeCooldownUntil) < 0)
+            {
+                edgeArmed = false;
+                return false;
+            }
+
             if (!edgeArmed)
             {
-                const int margin = 4;
+                // 必须真正离开判定线一段距离才重新武装，4px 太浅，边缘抖动会反复触发
+                const int margin = 24;
                 bool away = x > screenBounds.Left + margin && x < screenBounds.Right - margin - 1
                     && y > screenBounds.Top + margin && y < screenBounds.Bottom - margin - 1;
                 if (away)
@@ -3373,22 +3384,26 @@ namespace TypeBridgeApp
             Point p = Cursor.Position;
             int rx;
             int ry;
+            // 进入点不要贴着远端屏幕边缘：原来 rx=1，鼠标在交接线上一点反向抖动就会满足
+            // 返回条件（虚拟坐标 < 0），来回一抖就疯狂进出，光标跟着闪。
+            int insetX = Math.Min(40, Math.Max(2, remoteWidth / 8));
+            int insetY = Math.Min(40, Math.Max(2, remoteHeight / 8));
             switch (switchEdge)
             {
                 case "left":
-                    rx = remoteWidth - 2;
+                    rx = remoteWidth - insetX;
                     ry = MapRange(p.Y - b.Top, b.Height, remoteHeight, 0);
                     break;
                 case "top":
                     rx = MapRange(p.X - b.Left, b.Width, remoteWidth, 0);
-                    ry = remoteHeight - 2;
+                    ry = remoteHeight - insetY;
                     break;
                 case "bottom":
                     rx = MapRange(p.X - b.Left, b.Width, remoteWidth, 0);
-                    ry = 1;
+                    ry = insetY;
                     break;
                 default:
-                    rx = 1;
+                    rx = insetX;
                     ry = MapRange(p.Y - b.Top, b.Height, remoteHeight, 0);
                     break;
             }
@@ -3403,19 +3418,20 @@ namespace TypeBridgeApp
             switch (switchEdge)
             {
                 case "left":
-                    wx = b.Left + 1;
+                    wx = b.Left + 30;
                     wy = MapRange(mouseHook.VirtualY, remoteHeight, b.Height, b.Top);
                     break;
                 case "top":
                     wx = MapRange(mouseHook.VirtualX, remoteWidth, b.Width, b.Left);
-                    wy = b.Top + 1;
+                    wy = b.Top + 30;
                     break;
                 case "bottom":
                     wx = MapRange(mouseHook.VirtualX, remoteWidth, b.Width, b.Left);
-                    wy = b.Bottom - 2;
+                    wy = b.Bottom - 30;
                     break;
                 default:
-                    wx = b.Right - 2;
+                    // 落点离判定线留一段距离，否则光标紧贴边缘，稍有抖动又会被判成"要切走"
+                    wx = b.Right - 30;
                     wy = MapRange(mouseHook.VirtualY, remoteHeight, b.Height, b.Top);
                     break;
             }
