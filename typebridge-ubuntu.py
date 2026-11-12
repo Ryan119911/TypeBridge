@@ -1070,6 +1070,31 @@ def handle_line(line, sock):
         except OSError:
             pass
         return True
+    if line == "WHERE":
+        # Windows 端问：文件到底会落到哪个目录
+        try:
+            sock.sendall(("DIR " + resolve_file_dir() + "\n").encode("utf-8"))
+        except OSError:
+            pass
+        return True
+    if line == "OPEN":
+        # Windows 端托盘菜单「在 Ubuntu 上打开接收目录」
+        directory = resolve_file_dir()
+        try:
+            os.makedirs(directory, exist_ok=True)
+            subprocess.Popen(["xdg-open", directory],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+            log("open receive dir: %s" % directory)
+            reply = "OPEN ok"
+        except Exception as e:
+            log("open receive dir failed: %r" % (e,))
+            reply = "OPEN %s" % (e,)
+        try:
+            sock.sendall((reply + "\n").encode("utf-8"))
+        except OSError:
+            pass
+        return True
     if len(line) < 3 or line[1] != " ":
         return True
     cmd, payload = line[0], line[2:]
@@ -1311,6 +1336,8 @@ def handle_upload(conn, addr):
         elapsed = max(0.001, time.time() - started)
         log("file <- %s (%d bytes, %.1f MB/s) -> %s"
             % (name, size, size / elapsed / 1048576.0, dest))
+        # 桌面提醒：接收方也要知道文件落在哪个目录，不然只能自己翻
+        _tray_notify("收到文件", "%s\n→ %s" % (name, os.path.dirname(dest)))
         conn.sendall(("OK " + dest + "\n").encode("utf-8"))
     except Exception as e:
         log("file upload failed: %r" % (e,))

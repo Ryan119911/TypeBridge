@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.5.4.0")]
+[assembly: AssemblyVersion("3.5.5.0")]
 
 namespace TypeBridgeApp
 {
@@ -2142,6 +2142,7 @@ namespace TypeBridgeApp
         private readonly ToolStripMenuItem mouseToggleItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem settingsItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem sendFileItem = new ToolStripMenuItem();
+        private readonly ToolStripMenuItem openRemoteDirItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem dropPadItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem exitItem = new ToolStripMenuItem();
         private readonly Timer connectionTimer = new Timer();
@@ -2155,6 +2156,7 @@ namespace TypeBridgeApp
         private int fileRecvPort = 4323;
         private string recvDir = string.Empty;      // 从 Ubuntu 收到的文件放哪
         private string remoteDir = string.Empty;    // 发到 Ubuntu 时落到哪个目录
+        private string remoteResolvedDir = string.Empty; // Ubuntu 端实际解析出来的接收目录
         private TcpListener fileListener;
         private volatile bool receiverRunning;
         private DropPadForm dropPad;
@@ -2248,6 +2250,16 @@ namespace TypeBridgeApp
             settingsItem.Click += delegate { ShowSettings(false); };
             sendFileItem.Text = "发送文件到 Ubuntu...";
             sendFileItem.Click += delegate { SendFilesDialog(); };
+            openRemoteDirItem.Text = "在 Ubuntu 上打开接收目录";
+            openRemoteDirItem.Click += delegate
+            {
+                if (stream == null)
+                {
+                    ShowTrayTip("TypeBridge", "尚未连接 Ubuntu");
+                    return;
+                }
+                SendLine("OPEN");
+            };
             dropPadItem.Text = "文件拖放区（拖动文件直接传）";
             dropPadItem.Click += delegate { ToggleDropPad(); };
             exitItem.Text = "退出 TypeBridge";
@@ -2256,6 +2268,7 @@ namespace TypeBridgeApp
             trayMenu.Items.Add(mouseToggleItem);
             trayMenu.Items.Add(new ToolStripSeparator());
             trayMenu.Items.Add(sendFileItem);
+            trayMenu.Items.Add(openRemoteDirItem);
             trayMenu.Items.Add(dropPadItem);
             trayMenu.Items.Add(settingsItem);
             trayMenu.Items.Add(exitItem);
@@ -3109,6 +3122,31 @@ namespace TypeBridgeApp
                 return;
             }
 
+            if (line.StartsWith("DIR ", StringComparison.Ordinal))
+            {
+                // Ubuntu 端收到 DIR 后回的是"它实际会写进去的目录"
+                remoteResolvedDir = line.Substring(4).Trim();
+                Log.Write("ubuntu receive dir: " + remoteResolvedDir);
+                return;
+            }
+
+            if (line.StartsWith("OPEN ", StringComparison.Ordinal))
+            {
+                string result = line.Substring(5).Trim();
+                Log.Write("open dir on ubuntu: " + result);
+                try
+                {
+                    hotkeyForm.BeginInvoke(new Action(delegate
+                    {
+                        ShowTrayTip("Ubuntu 接收目录",
+                            result == "ok" ? (remoteResolvedDir.Length > 0 ? remoteResolvedDir : "已在 Ubuntu 上打开")
+                                           : ("打开失败：" + result));
+                    }));
+                }
+                catch { }
+                return;
+            }
+
             if (line.Length >= 2 && line[0] == 'C' && line[1] == ' ')
             {
                 string text = null;
@@ -3460,13 +3498,17 @@ namespace TypeBridgeApp
         {
             int ok = 0;
             string firstProblem = null;
+            string lastDestination = null;
 
             foreach (string file in files)
             {
                 string error;
-                if (UploadOne(file, out error))
+                string destination;
+                if (UploadOne(file, out error, out destination))
                 {
                     ok++;
+                    if (destination != null)
+                        lastDestination = destination;
                 }
                 else if (firstProblem == null)
                 {
@@ -3474,7 +3516,15 @@ namespace TypeBridgeApp
                 }
             }
 
+            // 落地路径必须回显：之前只说"已发送"，用户根本不知道文件进了 Ubuntu 的哪个目录
             string message = "已发送 " + ok + " / " + files.Length + " 个文件到 Ubuntu";
+            if (ok > 0)
+            {
+                if (files.Length == 1 && lastDestination != null)
+                    message += " → " + lastDestination;
+                else if (lastDestination != null)
+                    message += " → " + System.IO.Path.GetDirectoryName(lastDestination);
+            }
             if (firstProblem != null)
                 message += "（" + firstProblem + "）";
 
@@ -3489,9 +3539,10 @@ namespace TypeBridgeApp
             catch { }
         }
 
-        private bool UploadOne(string path, out string error)
+        private bool UploadOne(string path, out string error, out string destination)
         {
             error = null;
+            destination = null;
             TcpClient socket = null;
             try
             {
@@ -3507,9 +3558,12 @@ namespace TypeBridgeApp
                 if (!socket.ConnectAsync(ip, filePort).Wait(4000))
                 {
                     error = "连不上文件端口 " + filePort;
+                    Log.Write("send file failed: " + info.Name + " " + error);
                     return false;
                 }
 
+                Log.Write("send file: " + info.Name + " (" + info.Length + " bytes) -> "
+                    + ip + ":" + filePort);
                 NetworkStream target = socket.GetStream();
                 byte[] head = Encoding.UTF8.GetBytes("UPLOAD " + info.Length + " " + info.Name + "\n");
                 target.Write(head, 0, head.Length);
@@ -3532,13 +3586,18 @@ namespace TypeBridgeApp
                 if (reply == null)
                 {
                     error = "没有收到 Ubuntu 的确认";
+                    Log.Write("send file failed: " + info.Name + " " + error);
                     return false;
                 }
                 if (!reply.StartsWith("OK"))
                 {
                     error = reply;
+                    Log.Write("send file failed: " + info.Name + " " + reply);
                     return false;
                 }
+                // 回复形如 "OK /home/robot/Desktop/x.txt"，把真实落地路径带回去
+                destination = reply.Substring(2).Trim();
+                Log.Write("sent file: " + info.Name + " -> " + destination);
                 return true;
             }
             catch (Exception ex)

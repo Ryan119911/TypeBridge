@@ -33,7 +33,7 @@ Ubuntu 安装包会创建应用菜单入口和开机自启的 systemd 用户服�
 - **全键盘转发**：独立 Ctrl/Shift/Alt/Win、F1–F24、CapsLock/NumLock、小键盘、PrintScreen 和媒体键。
 - **鼠标转发**：接管鼠标时，移动、左/中/右键、侧键、滚轮都送到 Ubuntu（见「鼠标支持」）。
 - **屏幕边缘切换**：把鼠标推过指定屏幕边缘即可切换到 Ubuntu，从共享边缘推回即回到 Windows，像硬件 KVM（`typebridge.ini` 的 `edge_switch` 配置，默认关闭）。
-- **文件互传**：Windows 拖文件到边缘传送区（或托盘菜单）发往 Ubuntu；Ubuntu 端把文件拖进「发送到 Windows」小窗即落到 Windows 的接收目录（默认 `下载\typebridge`），走独立端口 4322/4323，传输不影响输入。
+- **文件互传**：Windows 拖文件到边缘传送区（或托盘菜单）发往 Ubuntu；Ubuntu 端把文件拖进「发送到 Windows」小窗即落到 Windows 的接收目录（默认 `下载\typebridge`），走独立端口 4322/4323，传输不影响输入。发完的提示会带上**实际落地路径**，托盘菜单里另有「在 Ubuntu 上打开接收目录」；接收端会弹桌面通知告诉文件落在哪。
 - **剪贴板同步**：Windows 与 Ubuntu 之间自动互相同步文本和图片。图片走文件通道（`CLIPIMG`），截屏、浏览器里"复制图片"都能直接到另一端粘贴；图和文本会一起带过去，目标程序粘哪个自己挑（对端为旧版守护进程时自动失效为单向或无）。
 - **组合键**：Ctrl/Alt/Win + 字母、数字、功能键，例如 `Ctrl+A`、`Alt+B`、`Win+E`。
 - **独立配置**：首次运行填入自己的 Ubuntu IP 和端口，保存在本地 `typebridge.ini`。
@@ -330,6 +330,8 @@ Windows 端使用低级键盘与鼠标钩子：
 | `QUIT` | 断开连接 |
 | `C <json字符串>` | 写对端剪贴板（文本，双向都用） |
 | `BT` | Ubuntu 端通知 Windows 切回本机（托盘菜单"切回 Windows"，Ubuntu -> Windows） |
+| `WHERE` | 问 Ubuntu 的文件接收目录，回 `DIR <目录>` |
+| `OPEN` | 让 Ubuntu 打开接收目录（托盘菜单"在 Ubuntu 上打开接收目录"），回 `OPEN ok` |
 | `CLIPIMG <图片字节数> <文本字节数>` | 走文件通道传一张 PNG，可带一段可选文本，写进对端剪贴板（不落盘）。文本放在图片之后，旧版对端只读图片也能用 |
 
 `K` 键名和 `B` 按钮编号都使用白名单校验，未知值会被拒绝并记录日志。旧客户端只发送 `BackSpace` 和 `Return` 时仍然兼容。
@@ -374,7 +376,7 @@ Windows 端使用低级键盘与鼠标钩子：
 在 Ubuntu 上执行：
 
 ```bash
-VERSION=3.5.4 bash ubuntu/build-deb.sh
+VERSION=3.5.5 bash ubuntu/build-deb.sh
 ```
 
 生成：
