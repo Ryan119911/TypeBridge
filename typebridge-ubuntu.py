@@ -1252,13 +1252,36 @@ def resolve_file_dir(name=""):
     return os.path.expanduser("~/Downloads")
 
 
+def part_meta_path(dest):
+    return dest + ".part.info"
+
+
+def resume_offset(dest, name, size):
+    """已经收到多少字节可以接着传。文件名或总大小对不上就返回 0，绝不能拼错文件。"""
+    part = dest + ".part"
+    try:
+        with open(part_meta_path(dest), "r", encoding="utf-8") as fh:
+            meta = json.load(fh)
+    except Exception:
+        return 0
+    if meta.get("name") != name or meta.get("size") != size:
+        return 0
+    try:
+        have = os.path.getsize(part)
+    except OSError:
+        return 0
+    if have <= 0 or have >= size:
+        return 0
+    return have
+
+
 def handle_upload(conn, addr):
     try:
         conn.settimeout(120)  # 空闲 120s 才判死：大文件+慢链路别动不动断
         stream = conn.makefile("rb")
         header = stream.readline(4096).decode("utf-8", "replace").strip()
         parts = header.split(" ", 2)
-        if len(parts) != 3 or parts[0] not in ("UPLOAD", "CLIPIMG"):
+        if len(parts) != 3 or parts[0] not in ("UPLOAD", "CLIPIMG", "RESUME"):
             log("file: bad header %r from %s" % (header[:60], addr[0]))
             conn.sendall(b"ERR bad header\n")
             return
@@ -1269,6 +1292,19 @@ def handle_upload(conn, addr):
             return
         if size < 0:
             conn.sendall(b"ERR bad size\n")
+            return
+
+        if parts[0] == "RESUME":
+            # 断点续传握手：告诉发送方 .part 里已经有几个字节
+            raw = parts[2]
+            name, _, tail = raw.rpartition(" ")
+            if not tail.isdigit():
+                name = raw
+            name = safe_name(name)
+            dest = unique_path(resolve_file_dir(name), name)
+            have = resume_offset(dest, name, size)
+            log("resume query: %s have %d/%d" % (name, have, size))
+            conn.sendall(("HAVE %d\n" % have).encode("utf-8"))
             return
 
         if parts[0] == "CLIPIMG":
@@ -1305,16 +1341,47 @@ def handle_upload(conn, addr):
             conn.sendall(b"OK clipboard\n")
             return
 
-        name = safe_name(parts[2])
-        directory = resolve_file_dir(parts[2])
+        # 第四段是可选的续传偏移；旧版客户端只发文件名，这里解析不到数字就当从头传
+        raw = parts[2]
+        name, _, tail = raw.rpartition(" ")
+        offset = 0
+        if tail.isdigit():
+            offset = int(tail)
+        else:
+            name = raw
+        name = safe_name(name)
+        directory = resolve_file_dir(name)
         os.makedirs(directory, exist_ok=True)
         dest = unique_path(directory, name)
-
-        received = 0
-        last_mark = 0
-        started = time.time()
         temp_dest = dest + ".part"
-        with open(temp_dest, "wb") as out:
+
+        if offset > 0:
+            try:
+                have = os.path.getsize(temp_dest)
+            except OSError:
+                have = 0
+            if have < offset or offset > size:
+                log("file: %s 断点 %d 与本地 %d 不符，改为从头传" % (name, offset, have))
+                offset = 0
+
+        if offset > 0:
+            log("file: %s 从 %d/%d (%d%%) 续传"
+                % (name, offset, size, offset * 100 // max(1, size)))
+
+        started = time.time()
+        received = offset
+        last_mark = offset
+        mode = "r+b" if offset > 0 else "wb"
+        with open(temp_dest, mode) as out:
+            if offset > 0:
+                out.seek(offset)
+                out.truncate(offset)
+            else:
+                try:
+                    with open(part_meta_path(dest), "w", encoding="utf-8") as meta:
+                        json.dump({"name": name, "size": size}, meta)
+                except OSError:
+                    pass
             while received < size:
                 chunk = stream.read(min(1 << 18, size - received))
                 if not chunk:
@@ -1328,20 +1395,23 @@ def handle_upload(conn, addr):
                         % (name, received * 100 // size, received >> 20, size >> 20))
 
         if received != size:
-            log("file: incomplete %s (%d/%d) from %s" % (name, received, size, addr[0]))
-            try:
-                os.remove(temp_dest)
-            except OSError:
-                pass
+            # 保留 .part 和 .part.info：下次同一个文件重发就能接着传
+            log("file: incomplete %s (%d/%d) from %s，断点已保留"
+                % (name, received, size, addr[0]))
             conn.sendall(b"ERR incomplete\n")
             return
 
         # 原子替换：要么是完整的旧文件，要么是完整的新文件，不会留下半截或副本
         os.replace(temp_dest, dest)
+        try:
+            os.remove(part_meta_path(dest))
+        except OSError:
+            pass
 
         elapsed = max(0.001, time.time() - started)
-        log("file <- %s (%d bytes, %.1f MB/s) -> %s"
-            % (name, size, size / elapsed / 1048576.0, dest))
+        log("file <- %s (%d bytes, 本次 %d bytes, %.1f MB/s%s) -> %s"
+            % (name, size, size - offset, (size - offset) / elapsed / 1048576.0,
+               "，续传" if offset else "", dest))
         # 桌面提醒：接收方也要知道文件落在哪个目录，不然只能自己翻
         _tray_notify("收到文件", "%s\n→ %s" % (name, os.path.dirname(dest)))
         conn.sendall(("OK " + dest + "\n").encode("utf-8"))

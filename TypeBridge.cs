@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.5.6.0")]
+[assembly: AssemblyVersion("3.5.7.0")]
 
 namespace TypeBridgeApp
 {
@@ -2204,8 +2204,49 @@ namespace TypeBridgeApp
 
                 Log.Write("send file: " + info.Name + " (" + info.Length + " bytes) -> "
                     + ip + ":" + port);
+
+                // 先问对端已经收到多少：新版本回 HAVE <字节数>，旧版本回 ERR bad header，
+                // 拿不到就按"从头传"走老格式，保持兼容。
+                long offset = 0;
+                bool resumeSupported = false;
+                try
+                {
+                    using (TcpClient probe = new TcpClient())
+                    {
+                        probe.NoDelay = true;
+                        if (probe.ConnectAsync(ip, port).Wait(3000))
+                        {
+                            NetworkStream prober = probe.GetStream();
+                            byte[] question = Encoding.UTF8.GetBytes(
+                                "RESUME " + info.Length + " " + info.Name + "\n");
+                            prober.Write(question, 0, question.Length);
+                            prober.Flush();
+                            probe.ReceiveTimeout = 2500;
+                            string answer = ReadReply(probe);
+                            if (answer != null && answer.StartsWith("HAVE "))
+                            {
+                                resumeSupported = true;
+                                long already;
+                                if (long.TryParse(answer.Substring(5).Trim(), out already)
+                                    && already > 0 && already < info.Length)
+                                    offset = already;
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                }
+
+                if (offset > 0)
+                    Log.Write("resume " + info.Name + " from " + offset + "/" + info.Length
+                        + " (" + (offset * 100 / Math.Max(1, info.Length)) + "%)");
+
                 NetworkStream target = socket.GetStream();
-                byte[] head = Encoding.UTF8.GetBytes("UPLOAD " + info.Length + " " + info.Name + "\n");
+                string header = "UPLOAD " + info.Length + " " + info.Name;
+                if (resumeSupported)
+                    header += " " + offset;
+                byte[] head = Encoding.UTF8.GetBytes(header + "\n");
                 target.Write(head, 0, head.Length);
 
                 byte[] buffer = new byte[262144];
@@ -2213,6 +2254,8 @@ namespace TypeBridgeApp
                 using (FileStream input = new FileStream(path, FileMode.Open, FileAccess.Read,
                     FileShare.Read, 262144, FileOptions.SequentialScan))
                 {
+                    if (offset > 0)
+                        input.Seek(offset, SeekOrigin.Begin);
                     int read;
                     while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
                     {
@@ -2220,13 +2263,14 @@ namespace TypeBridgeApp
                         {
                             error = "已取消";
                             Log.Write("send file cancelled: " + info.Name + " at "
-                                + sent + "/" + info.Length + " bytes");
+                                + (offset + sent) + "/" + info.Length + " bytes"
+                                + "（已传部分留在 Ubuntu，重发会接着传）");
                             return false;
                         }
                         target.Write(buffer, 0, read);
                         sent += read;
                         if (progress != null)
-                            progress.Report(info.Name, sent, info.Length);
+                            progress.Report(info.Name, offset + sent, info.Length);
                     }
                 }
                 target.Flush();
