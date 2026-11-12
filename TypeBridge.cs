@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.5.10.0")]
+[assembly: AssemblyVersion("3.5.11.0")]
 
 namespace TypeBridgeApp
 {
@@ -1312,6 +1312,9 @@ namespace TypeBridgeApp
         private bool hasRestore;
         private bool pinned;
         private bool cursorHidden;
+        private bool hasRestoreTarget;
+        private int restoreTargetX;
+        private int restoreTargetY;
 
         private bool enabled;
         private bool connected;
@@ -1529,9 +1532,11 @@ namespace TypeBridgeApp
                     hasRestore = true;
                 }
             }
+            // 先藏再挪：反过来的话，光标会先"跳"到屏幕中心并露一帧，然后才变透明，
+            // 看起来就是闪一下
+            HideSystemCursor();
             SetCursorPos(anchorX, anchorY);
             pinned = true;
-            HideSystemCursor();
         }
 
         /// <summary>退出接管后把光标放回接管前的位置。</summary>
@@ -1540,14 +1545,29 @@ namespace TypeBridgeApp
             if (!pinned)
                 return;
             pinned = false;
-            ShowSystemCursor();
             pendingDx = 0;
             pendingDy = 0;
-            if (hasRestore)
+            // 先挪到位再显示：否则光标会先在中间露一帧，再跳到边缘
+            if (hasRestoreTarget)
+            {
+                SetCursorPos(restoreTargetX, restoreTargetY);
+                hasRestoreTarget = false;
+                hasRestore = false;
+            }
+            else if (hasRestore)
             {
                 SetCursorPos(restoreX, restoreY);
                 hasRestore = false;
             }
+            ShowSystemCursor();
+        }
+
+        /// <summary>交给 EdgeReturned 调用：指定回到 Windows 后光标该落在哪。</summary>
+        internal void SetRestoreTarget(int x, int y)
+        {
+            restoreTargetX = x;
+            restoreTargetY = y;
+            hasRestoreTarget = true;
         }
 
         /// <summary>退出接管时把还按着的键全部松开，避免对端卡住。</summary>
@@ -1655,7 +1675,8 @@ namespace TypeBridgeApp
                                     pendingDy = 0;
                                     // 刚回来的一小段时间不许再切走，否则鼠标在边缘上就是来回抖
                                     edgeArmed = false;
-                                    edgeCooldownUntil = unchecked(Environment.TickCount + 400);
+                                    edgeCooldownUntil = unchecked(Environment.TickCount + 700);
+                                    Log.Write("edge return (vx=" + virtualX + " vy=" + virtualY + ")");
                                     EventHandler returned = EdgeReturned;
                                     if (returned != null)
                                     {
@@ -1751,16 +1772,18 @@ namespace TypeBridgeApp
         /// </summary>
         internal static bool ShouldReturnToWindows(string edge, int vx, int vy, int width, int height)
         {
+            // 必须"越过交接边再往里推一段"才算真的要回来，否则贴着边抖一下就来回切
+            const int margin = 40;
             switch (edge)
             {
                 case "left":
-                    return vx >= width;
+                    return vx >= width + margin;
                 case "top":
-                    return vy >= height;
+                    return vy >= height + margin;
                 case "bottom":
-                    return vy < 0;
+                    return vy < -margin;
                 default:
-                    return vx < 0;
+                    return vx < -margin;
             }
         }
 
@@ -1791,7 +1814,7 @@ namespace TypeBridgeApp
             if (!edgeArmed)
             {
                 // 必须真正离开判定线一段距离才重新武装，4px 太浅，边缘抖动会反复触发
-                const int margin = 24;
+                const int margin = 40;
                 bool away = x > screenBounds.Left + margin && x < screenBounds.Right - margin - 1
                     && y > screenBounds.Top + margin && y < screenBounds.Bottom - margin - 1;
                 if (away)
@@ -1823,7 +1846,7 @@ namespace TypeBridgeApp
             }
 
             edgeHits++;
-            if (edgeHits < 3)
+            if (edgeHits < 5)
                 return false;
 
             edgeHits = 0;
@@ -3386,8 +3409,8 @@ namespace TypeBridgeApp
             int ry;
             // 进入点不要贴着远端屏幕边缘：原来 rx=1，鼠标在交接线上一点反向抖动就会满足
             // 返回条件（虚拟坐标 < 0），来回一抖就疯狂进出，光标跟着闪。
-            int insetX = Math.Min(40, Math.Max(2, remoteWidth / 8));
-            int insetY = Math.Min(40, Math.Max(2, remoteHeight / 8));
+            int insetX = Math.Min(60, Math.Max(2, remoteWidth / 6));
+            int insetY = Math.Min(60, Math.Max(2, remoteHeight / 6));
             switch (switchEdge)
             {
                 case "left":
@@ -3407,7 +3430,7 @@ namespace TypeBridgeApp
                     ry = MapRange(p.Y - b.Top, b.Height, remoteHeight, 0);
                     break;
             }
-            EnterRemote(rx, ry, "边缘切屏");
+            EnterRemote(rx, ry, "边缘切屏 rx=" + rx + " ry=" + ry);
         }
 
         private void OnEdgeReturned()
@@ -3438,10 +3461,9 @@ namespace TypeBridgeApp
 
             if (linkMouse)
                 SetKeyboardMode(false, false);
+            mouseHook.SetRestoreTarget(wx, wy);
             SetMouseMode(false, false);
             mouseHook.Watching = edgeSwitch && stream != null;
-            try { Cursor.Position = new Point(wx, wy); }
-            catch { }
         }
 
         /// <summary>进入 Ubuntu：切换到远端坐标 (rx, ry) 并开始跟踪虚拟位置。</summary>
