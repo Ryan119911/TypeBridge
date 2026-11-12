@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.5.8.0")]
+[assembly: AssemblyVersion("3.5.9.0")]
 
 namespace TypeBridgeApp
 {
@@ -59,6 +59,13 @@ namespace TypeBridgeApp
                     if (!created)
                         return;
 
+                    // 上次可能异常退出，系统光标还停在空白图上，启动先恢复
+                    GlobalMouseHook.RestoreSystemCursors();
+                    // 退出（含 Ctrl+C / 关闭进程）时再兜一次
+                    AppDomain.CurrentDomain.ProcessExit += delegate
+                    {
+                        GlobalMouseHook.RestoreSystemCursors();
+                    };
                     // 鼠标钩子拿到的是物理像素坐标，声明 DPI 感知后才能和光标坐标对齐
                     try { SetProcessDPIAware(); } catch { }
                     // WinForms 定时器默认按 15.6ms 计时，提到 1ms 才能跑 250Hz 的位移合并
@@ -1243,8 +1250,47 @@ namespace TypeBridgeApp
         [DllImport("user32.dll")]
         private static extern bool SetCursorPos(int x, int y);
 
-        [DllImport("user32.dll")]
-        private static extern int ShowCursor(bool show);
+        // ShowCursor 的显示计数是按线程算的，我们这进程光标底下的窗口属于别人，
+        // 减到 -1 也不会真的隐掉（实测 GetCursorInfo 仍是 CURSOR_SHOWING）。
+        // 真正全局生效的是把系统光标换成一张全透明图：SetSystemCursor。
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetSystemCursor(IntPtr cursor, uint id);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr CopyIcon(IntPtr icon);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool DestroyIcon(IntPtr icon);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SystemParametersInfo(uint action, uint param, IntPtr data, uint winIni);
+
+        private const uint SPI_SETCURSORS = 0x0057;
+
+        /// <summary>替换掉这些系统光标：指针可能落在任何窗口上，形状不止一个箭头。</summary>
+        private static readonly uint[] CursorIds = new uint[]
+        {
+            32512, // OCR_NORMAL
+            32513, // OCR_IBEAM
+            32514, // OCR_WAIT
+            32515, // OCR_CROSS
+            32516, // OCR_UP
+            32642, // OCR_SIZENWSE
+            32643, // OCR_SIZENESW
+            32644, // OCR_SIZEWE
+            32645, // OCR_SIZENS
+            32646, // OCR_SIZEALL
+            32648, // OCR_NO
+            32649, // OCR_HAND
+            32650, // OCR_APPSTARTING
+        };
+
+        /// <summary>进程启动时先把系统光标恢复成注册表里的默认值：上次若异常退出，光标可能还是空白。</summary>
+        internal static void RestoreSystemCursors()
+        {
+            try { SystemParametersInfo(SPI_SETCURSORS, 0, IntPtr.Zero, 0); }
+            catch { }
+        }
 
         [DllImport("user32.dll")]
         private static extern short GetAsyncKeyState(int key);
@@ -1418,8 +1464,8 @@ namespace TypeBridgeApp
         }
 
         /// <summary>
-        /// 接管期间把本机光标藏起来。ShowCursor 是全局显示计数，得一直减到负值才真的隐藏，
-        /// 否则别的程序加过的计数会把它顶回去。还原时按同样的次数补回来。
+        /// 接管期间把本机光标藏起来：把系统光标整体换成 32x32 全透明图。
+        /// ShowCursor 对别的窗口无效（计数按线程算），只有换系统光标才是全局的。
         /// </summary>
         private void HideSystemCursor()
         {
@@ -1427,30 +1473,44 @@ namespace TypeBridgeApp
                 return;
             try
             {
-                int count = ShowCursor(false);
-                int guard = 0;
-                while (count >= 0 && guard++ < 64)
-                    count = ShowCursor(false);
+                int replaced = 0;
+                using (Bitmap blank = new Bitmap(32, 32))
+                {
+                    IntPtr source = blank.GetHicon();
+                    if (source == IntPtr.Zero)
+                        return;
+                    foreach (uint id in CursorIds)
+                    {
+                        // SetSystemCursor 会接管并销毁句柄，所以每个 id 都要复制一份
+                        IntPtr copy = CopyIcon(source);
+                        if (copy != IntPtr.Zero && SetSystemCursor(copy, id))
+                            replaced++;
+                    }
+                    DestroyIcon(source);
+                }
                 cursorHidden = true;
-                Log.Write("hide local cursor (ShowCursor count now " + count + ")");
+                Log.Write("hide local cursor (system cursors replaced: " + replaced + ")");
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Log.Write("hide local cursor failed: " + ex.Message);
+            }
         }
 
         private void ShowSystemCursor()
         {
             if (!cursorHidden)
                 return;
+            cursorHidden = false;
             try
             {
-                int count = ShowCursor(true);
-                int guard = 0;
-                while (count < 0 && guard++ < 64)
-                    count = ShowCursor(true);
-                Log.Write("show local cursor (ShowCursor count now " + count + ")");
+                SystemParametersInfo(SPI_SETCURSORS, 0, IntPtr.Zero, 0);
+                Log.Write("show local cursor (system cursors restored)");
             }
-            catch { }
-            cursorHidden = false;
+            catch (Exception ex)
+            {
+                Log.Write("restore local cursor failed: " + ex.Message);
+            }
         }
 
         /// <summary>接管瞬间把光标钉到屏幕中心，避免锚点贴近屏幕边缘丢位移。</summary>

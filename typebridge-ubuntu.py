@@ -554,6 +554,36 @@ def _load_xfixes():
     return _xfixes
 
 
+def _apply_show(lib, force=False):
+    root = _x11.XDefaultRootWindow(_DPY)
+    if _pointer_hidden["value"] or force:
+        lib.XFixesShowCursor(_DPY, root)
+        _pointer_hidden["value"] = False
+        log("cursor: 显示")
+
+
+def _apply_hide(lib):
+    _pointer_hidden["pending"] = 0
+    root = _x11.XDefaultRootWindow(_DPY)
+    if not _pointer_hidden["value"]:
+        lib.XFixesHideCursor(_DPY, root)
+        _pointer_hidden["value"] = True
+        log("cursor: 隐藏（控制已交还 Windows）")
+        _pointer_hidden["timer"] = GLib.timeout_add_seconds(
+            POINTER_HIDE_TIMEOUT, _pointer_timeout)
+    return False
+
+
+def _cancel_pending_hide():
+    pending = _pointer_hidden.get("pending") or 0
+    if pending:
+        try:
+            GLib.source_remove(pending)
+        except Exception:
+            pass
+        _pointer_hidden["pending"] = 0
+
+
 def set_pointer_visible(visible, force=False):
     global _DPY
     if not _DPY:
@@ -561,14 +591,11 @@ def set_pointer_visible(visible, force=False):
     lib = _load_xfixes()
     if not lib:
         return
+    _cancel_pending_hide()
     try:
-        root = _x11.XDefaultRootWindow(_DPY)
         if visible:
             # force：新进程不知道上一个进程有没有把指针藏起来，启动时无条件还原一次
-            if _pointer_hidden["value"] or force:
-                lib.XFixesShowCursor(_DPY, root)
-                _pointer_hidden["value"] = False
-                log("cursor: 显示")
+            _apply_show(lib, force)
             if _pointer_hidden["timer"]:
                 try:
                     GLib.source_remove(_pointer_hidden["timer"])
@@ -576,20 +603,23 @@ def set_pointer_visible(visible, force=False):
                     pass
                 _pointer_hidden["timer"] = 0
         else:
-            if not _pointer_hidden["value"]:
-                lib.XFixesHideCursor(_DPY, root)
-                _pointer_hidden["value"] = True
-                log("cursor: 隐藏（控制已交还 Windows）")
-                _pointer_hidden["timer"] = GLib.timeout_add_seconds(
-                    POINTER_HIDE_TIMEOUT, _pointer_timeout)
+            # 来回切换很快时不立刻隐藏，等 250ms 定了再藏，避免指针闪一下
+            _pointer_hidden["pending"] = GLib.timeout_add(250, lambda: _apply_hide(lib))
         _x11.XFlush(_DPY)
     except Exception as e:
         log("cursor toggle failed: %r" % (e,))
 
 
+def ensure_pointer_visible():
+    """Windows 真的在驱动这台机器时，指针必须是可见的（防止状态不同步时"什么都看不到"）。"""
+    if _pointer_hidden["value"] or _pointer_hidden.get("pending"):
+        set_pointer_visible(True)
+
+
 def mouse_move(payload):
     """M <dx> <dy>：相对移动指针。先累加，等这批 M 行处理完由 flush_move 一次注入。"""
     global _pending_dx, _pending_dy
+    ensure_pointer_visible()
     parts = payload.split()
     if len(parts) != 2:
         log("bad M payload: %r" % (payload,))
@@ -640,6 +670,7 @@ def mouse_wheel(payload):
 
 def pointer_move_abs(payload):
     """P <x> <y>：把指针移到远端屏幕的绝对位置（切屏进入时用）。"""
+    ensure_pointer_visible()
     parts = payload.split()
     if len(parts) != 2:
         log("bad P payload: %r" % (payload,))
