@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.5.7.0")]
+[assembly: AssemblyVersion("3.5.8.0")]
 
 namespace TypeBridgeApp
 {
@@ -1244,6 +1244,9 @@ namespace TypeBridgeApp
         private static extern bool SetCursorPos(int x, int y);
 
         [DllImport("user32.dll")]
+        private static extern int ShowCursor(bool show);
+
+        [DllImport("user32.dll")]
         private static extern short GetAsyncKeyState(int key);
 
         [DllImport("user32.dll")]
@@ -1262,6 +1265,7 @@ namespace TypeBridgeApp
         private int restoreY;
         private bool hasRestore;
         private bool pinned;
+        private bool cursorHidden;
 
         private bool enabled;
         private bool connected;
@@ -1413,6 +1417,42 @@ namespace TypeBridgeApp
             UpdateTimer();
         }
 
+        /// <summary>
+        /// 接管期间把本机光标藏起来。ShowCursor 是全局显示计数，得一直减到负值才真的隐藏，
+        /// 否则别的程序加过的计数会把它顶回去。还原时按同样的次数补回来。
+        /// </summary>
+        private void HideSystemCursor()
+        {
+            if (cursorHidden)
+                return;
+            try
+            {
+                int count = ShowCursor(false);
+                int guard = 0;
+                while (count >= 0 && guard++ < 64)
+                    count = ShowCursor(false);
+                cursorHidden = true;
+                Log.Write("hide local cursor (ShowCursor count now " + count + ")");
+            }
+            catch { }
+        }
+
+        private void ShowSystemCursor()
+        {
+            if (!cursorHidden)
+                return;
+            try
+            {
+                int count = ShowCursor(true);
+                int guard = 0;
+                while (count < 0 && guard++ < 64)
+                    count = ShowCursor(true);
+                Log.Write("show local cursor (ShowCursor count now " + count + ")");
+            }
+            catch { }
+            cursorHidden = false;
+        }
+
         /// <summary>接管瞬间把光标钉到屏幕中心，避免锚点贴近屏幕边缘丢位移。</summary>
         internal void ResetAnchor()
         {
@@ -1430,6 +1470,7 @@ namespace TypeBridgeApp
             }
             SetCursorPos(anchorX, anchorY);
             pinned = true;
+            HideSystemCursor();
         }
 
         /// <summary>退出接管后把光标放回接管前的位置。</summary>
@@ -1438,6 +1479,7 @@ namespace TypeBridgeApp
             if (!pinned)
                 return;
             pinned = false;
+            ShowSystemCursor();
             pendingDx = 0;
             pendingDy = 0;
             if (hasRestore)
@@ -1777,6 +1819,9 @@ namespace TypeBridgeApp
             Enabled = false;
             Connected = false;
             RestoreCursor();
+            // disconnected 状态下 pinned 可能已经是 false，这里再兜一次，
+            // 避免异常退出后本机光标一直不可见
+            ShowSystemCursor();
             flushTimer.Stop();
             flushTimer.Dispose();
             if (hook != IntPtr.Zero)
@@ -3123,6 +3168,7 @@ namespace TypeBridgeApp
             keyboardMode = remote;
             hook.Enabled = remote;
             UpdateStatus();
+            SyncRemoteCursor();
             if (notify && switchToast)
                 ShowTrayTip("TypeBridge", remote ? "键盘 → Ubuntu（使用 Ubuntu 输入法）" : "键盘 → Windows");
         }
@@ -3154,9 +3200,21 @@ namespace TypeBridgeApp
 
             mouseMode = remote;
             UpdateStatus();
+            SyncRemoteCursor();
             if (notify && switchToast)
                 ShowTrayTip("TypeBridge", remote ? "鼠标 → Ubuntu" : "鼠标 → Windows");
             return true;
+        }
+
+        /// <summary>
+        /// 告诉 Ubuntu 那边指针该不该显示：只有"鼠标和键盘都在 Windows"时才隐藏。
+        /// 键盘还留在 Ubuntu（只用键盘的场景）时，Ubuntu 的指针要照常显示可用。
+        /// </summary>
+        private void SyncRemoteCursor()
+        {
+            if (stream == null)
+                return;
+            SendLine("CUR " + ((!mouseMode && !keyboardMode) ? "0" : "1"));
         }
 
         private void UpdateStatus()
@@ -3540,6 +3598,8 @@ namespace TypeBridgeApp
 
             // 始终下发：空值表示「用桌面」，否则守护进程会一直沿用上次的旧路径
             SendLine("DIR " + (remoteDir ?? string.Empty).Trim());
+            // 上一次可能把对端指针藏起来了，重连先把可见性恢复
+            SendLine("CUR 1");
             readerThread = new System.Threading.Thread(delegate () { ReadLoop(target); });
             readerThread.IsBackground = true;
             readerThread.Start();

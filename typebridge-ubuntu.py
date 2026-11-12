@@ -351,6 +351,8 @@ try:
     _x11.XOpenDisplay.restype = ctypes.c_void_p
     _x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
     _x11.XFlush.argtypes = [ctypes.c_void_p]
+    _x11.XDefaultRootWindow.restype = ctypes.c_ulong
+    _x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
     _DPY = _x11.XOpenDisplay(None)
     if _DPY:
         _xtst.XTestFakeRelativeMotionEvent.argtypes = [
@@ -516,6 +518,73 @@ def release_mouse_buttons(reason):
             log("mouse release failed: %r" % (e,))
     log("released mouse buttons %s (%s)" % (sorted(PRESSED_BUTTONS), reason))
     PRESSED_BUTTONS.clear()
+
+
+# ---- 指针可见性 ----
+# 鼠标切回 Windows 后，Ubuntu 这边会留一个 "僵在半路" 的指针。用 XFixes
+# 把它藏起来；一旦键盘还留在 Ubuntu（只用键盘的场景），指针要照常显示。
+_xfixes = None
+_pointer_hidden = {"value": False, "timer": 0}
+# 兜底：万一之后有人直接在本机用 Ubuntu（不经 Windows 桥），不能留一个永远看不见的指针
+POINTER_HIDE_TIMEOUT = 600
+
+
+def _pointer_timeout():
+    _pointer_hidden["timer"] = 0
+    if _pointer_hidden["value"]:
+        log("cursor: 隐藏超时，自动恢复显示")
+        set_pointer_visible(True)
+    return False
+
+
+def _load_xfixes():
+    global _xfixes
+    if _xfixes is not None:
+        return _xfixes
+    try:
+        lib = ctypes.CDLL("libXfixes.so.3")
+        lib.XFixesHideCursor.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        lib.XFixesHideCursor.restype = None
+        lib.XFixesShowCursor.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        lib.XFixesShowCursor.restype = None
+        _xfixes = lib
+    except Exception as e:
+        log("xfixes unavailable (%r)，指针隐藏不可用" % (e,))
+        _xfixes = False
+    return _xfixes
+
+
+def set_pointer_visible(visible, force=False):
+    global _DPY
+    if not _DPY:
+        return
+    lib = _load_xfixes()
+    if not lib:
+        return
+    try:
+        root = _x11.XDefaultRootWindow(_DPY)
+        if visible:
+            # force：新进程不知道上一个进程有没有把指针藏起来，启动时无条件还原一次
+            if _pointer_hidden["value"] or force:
+                lib.XFixesShowCursor(_DPY, root)
+                _pointer_hidden["value"] = False
+                log("cursor: 显示")
+            if _pointer_hidden["timer"]:
+                try:
+                    GLib.source_remove(_pointer_hidden["timer"])
+                except Exception:
+                    pass
+                _pointer_hidden["timer"] = 0
+        else:
+            if not _pointer_hidden["value"]:
+                lib.XFixesHideCursor(_DPY, root)
+                _pointer_hidden["value"] = True
+                log("cursor: 隐藏（控制已交还 Windows）")
+                _pointer_hidden["timer"] = GLib.timeout_add_seconds(
+                    POINTER_HIDE_TIMEOUT, _pointer_timeout)
+        _x11.XFlush(_DPY)
+    except Exception as e:
+        log("cursor toggle failed: %r" % (e,))
 
 
 def mouse_move(payload):
@@ -1077,6 +1146,10 @@ def handle_line(line, sock):
         except OSError:
             pass
         return True
+    if line.startswith("CUR "):
+        # Windows 说：这台 Ubuntu 的指针该不该显示
+        set_pointer_visible(line[4:].strip() != "0")
+        return True
     if line == "OPEN":
         # Windows 端托盘菜单「在 Ubuntu 上打开接收目录」
         directory = resolve_file_dir()
@@ -1204,6 +1277,8 @@ def drop(fd, msg):
         except OSError:
             pass
         release_mouse_buttons("disconnect")
+        # 客户端走了，没人再控制这台机器，指针必须恢复可见
+        set_pointer_visible(True)
         refresh_tray()
     log(msg)
     return False
@@ -1555,6 +1630,8 @@ def main():
     watch_clipboard()
     start_file_server()
     start_tray()
+    # 上一个进程可能把指针藏起来了（XFixes 的隐藏状态在服务端窗口上），启动先还原
+    set_pointer_visible(True, force=True)
     try:
         os.makedirs(outbox_dir(), exist_ok=True)
         GLib.timeout_add_seconds(2, scan_outbox)

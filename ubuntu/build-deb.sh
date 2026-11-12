@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${VERSION:-3.5.7}"
+VERSION="${VERSION:-3.5.8}"
 BUILD="$(mktemp -d)"
 trap 'rm -rf "$BUILD"' EXIT
 

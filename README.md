@@ -260,6 +260,10 @@ edge_switch=none
 
 鼠标接管是可选的：
 
+- 接管期间 Windows 本机光标会被**隐藏**（它被钉在屏幕中心当动点，露在那儿很碍眼），退回 Windows 时立刻恢复，并回到接管前的位置。
+- 鼠标切回 Windows 之后，Ubuntu 那边僵在原地的指针也会被**隐藏**（XFixes），不会再留一个光标停在屏幕边；但如果键盘还留在 Ubuntu（只用键盘的场景），Ubuntu 的指针照常显示、照常能用。
+- 连接断开时 Ubuntu 指针自动恢复可见。
+
 - **联动模式（默认）**：键盘和鼠标一起切换，按一次快捷键两端都过去，再按一次都回来。
 - **分开模式**：键盘用一个快捷键、鼠标用另一个快捷键，可以只把鼠标送到 Ubuntu，键盘仍留在 Windows。
 
@@ -333,6 +337,7 @@ Windows 端使用低级键盘与鼠标钩子：
 | `QUIT` | 断开连接 |
 | `C <json字符串>` | 写对端剪贴板（文本，双向都用） |
 | `BT` | Ubuntu 端通知 Windows 切回本机（托盘菜单"切回 Windows"，Ubuntu -> Windows） |
+| `CUR <0\|1>` | 指定 Ubuntu 指针可见性：`0` 隐藏（鼠标键盘都已回到 Windows），`1` 显示。断开连接时 Ubuntu 自动恢复可见 |
 | `WHERE` | 问 Ubuntu 的文件接收目录，回 `DIR <目录>` |
 | `OPEN` | 让 Ubuntu 打开接收目录（托盘菜单"在 Ubuntu 上打开接收目录"），回 `OPEN ok` |
 | `CLIPIMG <图片字节数> <文本字节数>` | 走文件通道传一张 PNG，可带一段可选文本，写进对端剪贴板（不落盘）。文本放在图片之后，旧版对端只读图片也能用 |
@@ -381,7 +386,7 @@ Windows 端使用低级键盘与鼠标钩子：
 在 Ubuntu 上执行：
 
 ```bash
-VERSION=3.5.7 bash ubuntu/build-deb.sh
+VERSION=3.5.8 bash ubuntu/build-deb.sh
 ```
 
 生成：
