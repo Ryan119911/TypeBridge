@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.5.11.0")]
+[assembly: AssemblyVersion("3.5.12.0")]
 
 namespace TypeBridgeApp
 {
@@ -1300,6 +1300,9 @@ namespace TypeBridgeApp
 
         private readonly HookProc callback;
         private readonly Timer flushTimer = new Timer();
+        private readonly Timer edgeDwellTimer = new Timer();
+        /// <summary>光标贴住边缘要停多久才切屏。按事件数判断的话，慢慢推过去反而切不动。</summary>
+        private const int EdgeDwellMs = 140;
         private readonly HashSet<int> pressedButtons = new HashSet<int>();
         private readonly Rectangle screenBounds;
         private IntPtr hook = IntPtr.Zero;
@@ -1323,7 +1326,6 @@ namespace TypeBridgeApp
         private bool watching;
         private bool tracking;
         private bool edgeArmed = true;
-        private int edgeHits;
         private int edgeCooldownUntil;
         private int virtualX;
         private int virtualY;
@@ -1337,6 +1339,8 @@ namespace TypeBridgeApp
             set
             {
                 enabled = value;
+                if (value)
+                    StopEdgeDwell();
                 UpdateTimer();
             }
         }
@@ -1348,8 +1352,9 @@ namespace TypeBridgeApp
             set
             {
                 watching = value;
-                edgeHits = 0;
                 edgeArmed = true;
+                if (!value)
+                    StopEdgeDwell();
             }
         }
 
@@ -1419,6 +1424,37 @@ namespace TypeBridgeApp
             anchorY = bounds.Top + bounds.Height / 2;
             flushTimer.Interval = FlushIntervalMs;
             flushTimer.Tick += delegate { Flush(); };
+            edgeDwellTimer.Interval = EdgeDwellMs;
+            edgeDwellTimer.Tick += delegate { OnEdgeDwell(); };
+        }
+
+        private void StartEdgeDwell()
+        {
+            if (!edgeDwellTimer.Enabled)
+                edgeDwellTimer.Start();
+        }
+
+        private void StopEdgeDwell()
+        {
+            if (edgeDwellTimer.Enabled)
+                edgeDwellTimer.Stop();
+        }
+
+        /// <summary>光标在判定线上停够时间才切：慢慢推过去也能切，快速甩过去也不会误切。</summary>
+        private void OnEdgeDwell()
+        {
+            StopEdgeDwell();
+            if (enabled || !watching || !connected || hook == IntPtr.Zero)
+                return;
+            Point p = Cursor.Position;
+            if (!AtSwitchEdge(p.X, p.Y))
+                return;
+            EventHandler entered = EdgeEntered;
+            if (entered != null)
+            {
+                try { entered(this, EventArgs.Empty); }
+                catch { }
+            }
         }
 
         private bool Active
@@ -1608,7 +1644,7 @@ namespace TypeBridgeApp
                     pendingDx = 0;
                     pendingDy = 0;
                     pressedButtons.Clear();
-                    edgeHits = 0;
+                    StopEdgeDwell();
                     return CallNextHookEx(hook, nCode, wParam, lParam);
                 }
 
@@ -1641,15 +1677,16 @@ namespace TypeBridgeApp
                             return CallNextHookEx(hook, nCode, wParam, lParam);
                         }
 
-                        if (AtSwitchEdge(data.X, data.Y))
+                        if (AtSwitchEdgeNow(data.X, data.Y))
                         {
-                            EventHandler entered = EdgeEntered;
-                            if (entered != null)
-                            {
-                                try { entered(this, EventArgs.Empty); }
-                                catch { }
-                            }
-                            return (IntPtr)1;
+                            // 停在判定线上就开始读秒，够 140ms 才真的切过去
+                            StartEdgeDwell();
+                        }
+                        else
+                        {
+                            StopEdgeDwell();
+                            // 离开判定线足够远才允许下一次切屏
+                            MaybeRearmEdge(data.X, data.Y);
                         }
                     }
                     return CallNextHookEx(hook, nCode, wParam, lParam);
@@ -1803,6 +1840,19 @@ namespace TypeBridgeApp
             }
         }
 
+        /// <summary>光标离开判定线足够远（且过了冷却）才允许下一次切屏，避免边缘抖动反复切。</summary>
+        private void MaybeRearmEdge(int x, int y)
+        {
+            if (edgeArmed)
+                return;
+            if (unchecked(Environment.TickCount - edgeCooldownUntil) < 0)
+                return;
+            const int margin = 40;
+            if (x > screenBounds.Left + margin && x < screenBounds.Right - margin - 1
+                && y > screenBounds.Top + margin && y < screenBounds.Bottom - margin - 1)
+                edgeArmed = true;
+        }
+
         private bool AtSwitchEdge(int x, int y)
         {
             if (unchecked(Environment.TickCount - edgeCooldownUntil) < 0)
@@ -1812,15 +1862,7 @@ namespace TypeBridgeApp
             }
 
             if (!edgeArmed)
-            {
-                // 必须真正离开判定线一段距离才重新武装，4px 太浅，边缘抖动会反复触发
-                const int margin = 40;
-                bool away = x > screenBounds.Left + margin && x < screenBounds.Right - margin - 1
-                    && y > screenBounds.Top + margin && y < screenBounds.Bottom - margin - 1;
-                if (away)
-                    edgeArmed = true;
                 return false;
-            }
 
             bool atEdge;
             switch (switchEdge)
@@ -1840,16 +1882,9 @@ namespace TypeBridgeApp
             }
 
             if (!atEdge)
-            {
-                edgeHits = 0;
-                return false;
-            }
-
-            edgeHits++;
-            if (edgeHits < 5)
                 return false;
 
-            edgeHits = 0;
+            // 已经停够时间了（由 OnEdgeDwell 调用），这里只做"是否允许切"的闸门判断
             edgeArmed = false;
             return true;
         }
