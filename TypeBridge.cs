@@ -1439,6 +1439,13 @@ namespace TypeBridgeApp
                 return;
             }
 
+            // 按住左键拖到边缘是要唤出文件传送区，这时候不能切屏
+            if ((GetAsyncKeyState(0x01) & 0x8000) != 0)
+            {
+                edgeDwellStart = 0;
+                return;
+            }
+
             Point p = Cursor.Position;
             if (!AtSwitchEdgeNow(p.X, p.Y))
             {
