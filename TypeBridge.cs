@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.5.14.0")]
+[assembly: AssemblyVersion("3.5.15.0")]
 
 namespace TypeBridgeApp
 {
@@ -2762,6 +2762,11 @@ namespace TypeBridgeApp
         private TcpClient client;
         private NetworkStream stream;
         private string ip = "127.0.0.1";
+        /// <summary>ip 可以写成"地址1, 地址2"，连接时并行探测，自动用延迟最低的那个。</summary>
+        private string[] hosts = new string[0];
+        private long pingSentTs;
+        private int lastSlowWarnTick;
+        private double lastRttMs;
         private int port = 4321;
         private int filePort = 4322;
         private int fileRecvPort = 4323;
@@ -3001,7 +3006,10 @@ namespace TypeBridgeApp
                     string key = line.Substring(0, separator).Trim().ToLowerInvariant();
                     string value = line.Substring(separator + 1).Trim();
                     if (key == "ip" && value.Length > 0)
+                    {
                         ip = value;
+                        RefreshHosts();
+                    }
                     if (key == "port")
                     {
                         int configuredPort;
@@ -3103,6 +3111,7 @@ namespace TypeBridgeApp
                         return;
 
                     ip = form.Host;
+                    RefreshHosts();
                     port = form.Port;
                     keyboardHotkey = form.KeyboardHotkey;
                     mouseHotkey = form.MouseHotkey;
@@ -3292,12 +3301,15 @@ namespace TypeBridgeApp
             if (mouseHook.Connected && !wasConnected && mouseMode && mouseHook.Enabled)
                 mouseHook.ResetAnchor();
 
+            string latency = stream != null && lastRttMs > 0
+                ? "，" + lastRttMs.ToString("0") + "ms" : string.Empty;
+
             if (linkMouse)
             {
                 if (keyboardMode)
                 {
                     tray.Text = stream != null
-                        ? "TypeBridge → Ubuntu（" + (mouseMode ? "键盘 + 鼠标" : "仅键盘") + "，已连接）"
+                        ? "TypeBridge → Ubuntu（" + (mouseMode ? "键盘 + 鼠标" : "仅键盘") + "，已连接" + latency + "）"
                         : "TypeBridge → Ubuntu（未连接）";
                     toggleItem.Text = "切换到 Windows\t" + keyboardHotkey;
                 }
@@ -3312,7 +3324,7 @@ namespace TypeBridgeApp
             {
                 tray.Text = "TypeBridge｜" + (stream != null ? "" : "未连接 ")
                     + "键盘:" + (keyboardMode ? "Ubuntu" : "Windows")
-                    + " 鼠标:" + (mouseMode ? "Ubuntu" : "Windows");
+                    + " 鼠标:" + (mouseMode ? "Ubuntu" : "Windows") + latency;
                 toggleItem.Text = (keyboardMode ? "键盘切换到 Windows\t" : "键盘切换到 Ubuntu\t")
                     + keyboardHotkey;
                 mouseToggleItem.Visible = true;
@@ -3714,6 +3726,18 @@ namespace TypeBridgeApp
             if (line == "PONG")
             {
                 lastPongUtc = DateTime.UtcNow;
+                if (pingSentTs != 0)
+                {
+                    lastRttMs = (System.Diagnostics.Stopwatch.GetTimestamp() - pingSentTs)
+                        * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                    pingSentTs = 0;
+                    // 延迟明显变高时记一笔，方便判断是不是被 TUN / 代理绕远了
+                    if (lastRttMs > 120 && Environment.TickCount - lastSlowWarnTick > 20000)
+                    {
+                        lastSlowWarnTick = Environment.TickCount;
+                        Log.Write("network slow: rtt=" + lastRttMs.ToString("0") + "ms");
+                    }
+                }
                 return;
             }
             if (line.Length >= 2 && line[0] == 'S' && line[1] == ' ')
@@ -4204,41 +4228,157 @@ namespace TypeBridgeApp
             return FileSender.ReadReply(socket);
         }
 
+        /// <summary>把 ip 拆成候选地址列表（逗号 / 分号 / 空白都算分隔符）。</summary>
+        private void RefreshHosts()
+        {
+            List<string> list = new List<string>();
+            if (!string.IsNullOrEmpty(ip))
+            {
+                foreach (string part in ip.Split(new char[] { ',', ';', '\uFF0C', '\uFF1B', ' ' },
+                                                 StringSplitOptions.RemoveEmptyEntries))
+                {
+                    string host = part.Trim();
+                    if (host.Length > 0 && !list.Contains(host))
+                        list.Add(host);
+                }
+            }
+            if (list.Count == 0)
+                list.Add("127.0.0.1");
+            hosts = list.ToArray();
+        }
+
+        /// <summary>在已经连上的 socket 上打一次 PING，返回往返毫秒；失败返回 -1。</summary>
+        private static double MeasurePing(TcpClient client, int timeoutMs)
+        {
+            try
+            {
+                client.ReceiveTimeout = timeoutMs;
+                NetworkStream socket = client.GetStream();
+                byte[] question = Encoding.UTF8.GetBytes("PING\n");
+                long started = System.Diagnostics.Stopwatch.GetTimestamp();
+                socket.Write(question, 0, question.Length);
+                socket.Flush();
+
+                byte[] buffer = new byte[256];
+                StringBuilder seen = new StringBuilder();
+                long deadline = Environment.TickCount + timeoutMs;
+                while (Environment.TickCount < deadline)
+                {
+                    int count = socket.Read(buffer, 0, buffer.Length);
+                    if (count <= 0)
+                        break;
+                    seen.Append(Encoding.UTF8.GetString(buffer, 0, count));
+                    if (seen.ToString().IndexOf("PONG", StringComparison.Ordinal) >= 0)
+                    {
+                        return (System.Diagnostics.Stopwatch.GetTimestamp() - started)
+                            * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                    }
+                }
+                return -1;
+            }
+            catch
+            {
+                return -1;
+            }
+        }
+
         private void ConnectToServer()
         {
             if (stream != null || connecting)
                 return;
             connecting = true;
-            string host = ip;
             int targetPort = port;
+            string[] targets = hosts.Length > 0 ? hosts : new string[] { ip };
+            string signature = string.Join(",", targets);
+
             // 连接放到线程池：原来 Wait(400) 每秒阻塞 UI 线程 400ms，
             // 期间全局钩子回调超时，按键鼠标会漏进 Windows。
             System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
-                TcpClient candidate = null;
-                bool ok = false;
-                try
+                List<TcpClient> opened = new List<TcpClient>();
+                StringBuilder report = new StringBuilder();
+                double bestRtt = double.MaxValue;
+                TcpClient best = null;
+                string bestHost = null;
+
+                // 并行探测：TUN / 代理可能把某条路径拖到几百毫秒，另一条却是直连，
+                // 所以每次都实测，用最快的那个，而不是死守配置里的第一个地址。
+                // 先把所有候选的连接同时发出去，避免一条不通的地址拖慢整次连接
+                List<System.Threading.Tasks.Task> pending = new List<System.Threading.Tasks.Task>();
+                List<TcpClient> probes = new List<TcpClient>();
+                foreach (string target in targets)
                 {
-                    candidate = new TcpClient();
-                    // 小包即时发送，否则 Nagle 会攒到 ACK 才走，鼠标位移会明显发黏
-                    candidate.NoDelay = true;
-                    ok = candidate.ConnectAsync(host, targetPort).Wait(600);
-                }
-                catch
-                {
-                    ok = false;
-                }
-                if (!ok && candidate != null)
-                {
-                    try { candidate.Close(); }
+                    TcpClient probe = new TcpClient();
+                    try { probe.NoDelay = true; } catch { }
+                    probes.Add(probe);
+                    try { pending.Add(probe.ConnectAsync(target, targetPort)); }
                     catch { }
                 }
                 try
                 {
+                    if (pending.Count > 0)
+                        System.Threading.Tasks.Task.WaitAll(pending.ToArray(), 900);
+                }
+                catch { }
+
+                for (int index = 0; index < probes.Count; index++)
+                {
+                    string target = targets[index];
+                    TcpClient probe = probes[index];
+                    if (!probe.Connected)
+                    {
+                        try { probe.Close(); }
+                        catch { }
+                        report.Append(target + " 连不上；");
+                        continue;
+                    }
+
+                    double rtt = MeasurePing(probe, 700);
+                    if (rtt <= 0)
+                    {
+                        try { probe.Close(); }
+                        catch { }
+                        report.Append(target + " 无响应；");
+                        continue;
+                    }
+                    report.Append(target + " " + rtt.ToString("0.0") + "ms；");
+                    opened.Add(probe);
+                    if (rtt < bestRtt)
+                    {
+                        bestRtt = rtt;
+                        best = probe;
+                        bestHost = target;
+                    }
+                }
+
+                // 没选中的按顺序关掉，只留最快那条
+                for (int i = 0; i < opened.Count; i++)
+                {
+                    if (!object.ReferenceEquals(opened[i], best))
+                    {
+                        try { opened[i].Close(); }
+                        catch { }
+                    }
+                }
+
+                TcpClient candidate = best;
+                string host = bestHost;
+                bool ok = candidate != null;
+                if (ok)
+                    Log.Write("path pick: " + host + ":" + targetPort + " rtt="
+                        + bestRtt.ToString("0.0") + "ms  候选[" + report + "]");
+                else
+                    Log.Write("connect failed: " + report);
+
+                try
+                {
+                    string captured = signature;
                     hotkeyForm.BeginInvoke(new MethodInvoker(delegate
                     {
                         connecting = false;
-                        if (!ok || stream != null || host != ip || targetPort != port)
+                        string currentSignature = string.Join(",",
+                            hosts.Length > 0 ? hosts : new string[] { ip });
+                        if (!ok || stream != null || currentSignature != captured || targetPort != port)
                         {
                             if (ok)
                             {
@@ -4249,7 +4389,9 @@ namespace TypeBridgeApp
                         }
                         client = candidate;
                         stream = candidate.GetStream();
-                        Log.Write("connected " + host + ":" + targetPort);
+                        lastRttMs = bestRtt;
+                        Log.Write("connected " + host + ":" + targetPort
+                            + " (" + bestRtt.ToString("0.0") + "ms)");
                         // 写超时：半死链路上 Write 最多卡 4 秒就报错，
                         // 不至于把 UI 线程外的发送线程卡几十秒才判死
                         try { stream.WriteTimeout = 4000; }
@@ -4355,6 +4497,7 @@ namespace TypeBridgeApp
         {
             if (stream != null)
             {
+                pingSentTs = System.Diagnostics.Stopwatch.GetTimestamp();
                 SendLine("PING");
 
                 if ((keyboardMode || mouseMode) && (DateTime.UtcNow - lastPongUtc).TotalSeconds > 3)

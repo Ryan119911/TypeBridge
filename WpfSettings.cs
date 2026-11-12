@@ -404,20 +404,26 @@ namespace TypeBridgeApp
             {
                 string target = hostBox.Text.Trim();
                 if (target.Length == 0) { Fail("先填地址"); return; }
+                string[] candidates = target.Split(new char[] { ',', ';', ' ', '，', '；' },
+                    StringSplitOptions.RemoveEmptyEntries);
                 detect.IsEnabled = false;
                 detect.Content = "连接中";
                 System.Threading.ThreadPool.QueueUserWorkItem(delegate
                 {
                     bool ok = false;
-                    try
+                    string hit = null;
+                    foreach (string candidate in candidates)
                     {
-                        using (System.Net.Sockets.TcpClient probe = new System.Net.Sockets.TcpClient())
+                        try
                         {
-                            var task = probe.ConnectAsync(target, 4321);
-                            ok = task.Wait(2000) && probe.Connected;
+                            using (System.Net.Sockets.TcpClient probe = new System.Net.Sockets.TcpClient())
+                            {
+                                var task = probe.ConnectAsync(candidate, 4321);
+                                if (task.Wait(1500) && probe.Connected) { ok = true; hit = candidate; break; }
+                            }
                         }
+                        catch { }
                     }
-                    catch { ok = false; }
                     Dispatcher.BeginInvoke(new Action(delegate
                     {
                         detect.IsEnabled = true;
@@ -430,7 +436,7 @@ namespace TypeBridgeApp
             Grid.SetColumn(detect, 1);
             addressRow.Children.Add(detect);
 
-            card.Children.Add(Label("Tailscale IP、局域网 IP 或主机名"));
+            card.Children.Add(Label("多个地址用逗号分隔，自动连延迟最低的那个"));
             card.Children.Add(addressRow);
 
             Grid portRow = new Grid { Margin = new Thickness(0, 12, 0, 0) };

@@ -1260,6 +1260,12 @@ def on_accept(fd, cond):
         return True
     if not addr[0].startswith("127."):
         LAST_PEER["addr"] = addr[0]
+    # 关掉 Nagle：心跳和按键都是小包，等延迟 ACK 会让 RTT 虚高 40ms，
+    # 输入也会发黏
+    try:
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except OSError:
+        pass
     # 先告诉客户端远端屏幕尺寸，边缘切屏要用它算坐标
     try:
         screen = Gdk.Screen.get_default()
