@@ -71,28 +71,21 @@ namespace TypeBridgeApp
             initialEdge = NormalizeEdge(switchEdgeValue);
 
             Title = firstRun ? "TypeBridge 首次设置" : "TypeBridge 设置";
-            // 系统窗口：分层透明窗口会强制 WPF 用灰度抗锯齿，关掉它才能真正走 ClearType。
-            // 标题栏由 WindowChrome 隐藏，阴影/圆角/边框交给 DWM；左右各留 6px 供系统拖宽。
+            // 普通窗口：标题栏、最小化/最大化/关闭、四边缩放全部交给系统，
+            // 和任意 Windows 软件一样，按钮不会跟着内容滚走。
             WindowStyle = WindowStyle.SingleBorderWindow;
             AllowsTransparency = false;
             Background = new SolidColorBrush(Color.FromRgb(245, 248, 254));
-            WindowChrome.SetWindowChrome(this, new WindowChrome
-            {
-                CaptionHeight = 0,
-                CornerRadius = new CornerRadius(0),
-                GlassFrameThickness = new Thickness(0),
-                ResizeBorderThickness = new Thickness(6, 0, 6, 0),
-                UseAeroCaptionButtons = false
-            });
             ResizeMode = ResizeMode.CanResize;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             ShowInTaskbar = true;   // 最小化后才能从任务栏恢复
             Topmost = true;
-            SizeToContent = SizeToContent.Height;
-            MaxHeight = SystemParameters.WorkArea.Height - 12;
             Width = 560;
+            Height = Math.Min(780, SystemParameters.WorkArea.Height - 80);
             MinWidth = 470;
+            MinHeight = 400;
             MaxWidth = 920;
+            MaxHeight = SystemParameters.WorkArea.Height - 12;
 
             // 文字清晰度：明确中文字体、小字号用 Display 模式对齐整像素、布局按整像素舍入。
             // 阴影单独成层，不给含文字的容器挂 Effect，否则整棵树会被光栅化。
@@ -185,18 +178,7 @@ namespace TypeBridgeApp
 
         // ---------- 结构 ----------
 
-        /// <summary>事件是否来自"屏幕排列"控件（窗口拖动要避开它）。</summary>
-        private bool FromArranger(object source)
-        {
-            DependencyObject node = source as DependencyObject;
-            while (node != null)
-            {
-                if (object.ReferenceEquals(node, arranger))
-                    return true;
-                node = VisualTreeHelper.GetParent(node);
-            }
-            return false;
-        }
+
 
         private UIElement BuildContent()
         {
@@ -207,17 +189,15 @@ namespace TypeBridgeApp
                 Background = new LinearGradientBrush(
                     Color.FromRgb(255, 255, 255), Color.FromRgb(240, 245, 253), new Point(0, 0), new Point(0.3, 1))
             };
-            shell.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e)
+            StackPanel stack = new StackPanel { Margin = new Thickness(22, 16, 22, 20) };
+
+            stack.Children.Add(new TextBlock
             {
-                // 点在"屏幕排列"的方块上是要拖方块，不能顺手把整个窗口拖走
-                if (FromArranger(e.OriginalSource))
-                    return;
-                try { DragMove(); } catch { }
-            };
-
-            StackPanel stack = new StackPanel { Margin = new Thickness(22, 18, 22, 20) };
-
-            stack.Children.Add(BuildHeader());
+                Text = "Windows ⇄ Ubuntu 键鼠与文件",
+                FontSize = 12.5,
+                Margin = new Thickness(2, 0, 0, 12),
+                Foreground = new SolidColorBrush(Sub)
+            });
             stack.Children.Add(BuildAddressCard());
 
             StackPanel hotkeyBody = new StackPanel();
@@ -290,120 +270,12 @@ namespace TypeBridgeApp
 
             shell.Child = layout;
 
-            // 外层阴影改由 DWM 绘制，这里不再放自绘阴影层
-            Grid root = new Grid();
-            root.Children.Add(shell);
-
-            // 右下角给一个轻量的"可拉宽"提示，不吃鼠标事件
-            TextBlock resizeHint = new TextBlock
-            {
-                Text = "◢",
-                FontSize = 11,
-                Foreground = new SolidColorBrush(Color.FromRgb(176, 190, 212)),
-                HorizontalAlignment = HorizontalAlignment.Right,
-                VerticalAlignment = VerticalAlignment.Bottom,
-                Margin = new Thickness(0, 0, 8, 6),
-                IsHitTestVisible = false
-            };
-            root.Children.Add(resizeHint);
-            root.Children.Add(MakeResizeGrip(true));
-            root.Children.Add(MakeResizeGrip(false));
-            return root;
+            return shell;
         }
 
-        /// <summary>无边框窗口左右各放一条透明 grip，拖它改宽度（高度仍随内容自适应）。</summary>
-        private Thumb MakeResizeGrip(bool leftEdge)
-        {
-            Thumb grip = new Thumb
-            {
-                Width = 6,
-                HorizontalAlignment = leftEdge ? HorizontalAlignment.Left : HorizontalAlignment.Right,
-                VerticalAlignment = VerticalAlignment.Stretch,
-                Background = Brushes.Transparent,
-                BorderThickness = new Thickness(0),
-                Opacity = 0,
-                Cursor = Cursors.SizeWE,
-                IsTabStop = false
-            };
-            grip.DragDelta += delegate(object s, DragDeltaEventArgs e)
-            {
-                double change = leftEdge ? -e.HorizontalChange : e.HorizontalChange;
-                double target = Math.Max(MinWidth, Math.Min(MaxWidth, ActualWidth + change));
-                if (Math.Abs(target - ActualWidth) < 0.5) return;
-                if (leftEdge) Left += ActualWidth - target;
-                Width = target;
-            };
-            return grip;
-        }
 
-        private UIElement BuildHeader()
-        {
-            Grid header = new Grid { Margin = new Thickness(2, 0, 0, 14) };
-            header.ColumnDefinitions.Add(new ColumnDefinition());
-            header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-            StackPanel titles = new StackPanel();
-            titles.Children.Add(new TextBlock
-            {
-                Text = "TypeBridge",
-                FontSize = 20,
-                FontWeight = FontWeights.Bold,
-                Foreground = new SolidColorBrush(Ink)
-            });
-            titles.Children.Add(new TextBlock
-            {
-                Text = "Windows ⇄ Ubuntu 键鼠与文件",
-                FontSize = 13,
-                Margin = new Thickness(0, 2, 0, 0),
-                Foreground = new SolidColorBrush(Sub)
-            });
-            header.Children.Add(titles);
 
-            Button close = new Button
-            {
-                Content = "✕",
-                Width = 30,
-                Height = 30,
-                FontSize = 13,
-                Cursor = Cursors.Hand,
-                Background = Brushes.Transparent,
-                BorderThickness = new Thickness(0),
-                Foreground = new SolidColorBrush(Sub),
-                Template = RoundButtonTemplate(0)
-            };
-            close.ToolTip = "取消并关闭";
-            close.Click += delegate { DialogResult = false; Close(); };
-            AddChromeButtonHover(close);
-
-            Button minimize = new Button
-            {
-                Content = "—",
-                Width = 30,
-                Height = 30,
-                FontSize = 13,
-                Cursor = Cursors.Hand,
-                Background = Brushes.Transparent,
-                BorderThickness = new Thickness(0),
-                Foreground = new SolidColorBrush(Sub),
-                Template = RoundButtonTemplate(0),
-                ToolTip = "最小化",
-                Margin = new Thickness(0, 0, 2, 0)
-            };
-            minimize.Click += delegate { WindowState = WindowState.Minimized; };
-            AddChromeButtonHover(minimize);
-
-            StackPanel windowButtons = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
-                HorizontalAlignment = HorizontalAlignment.Right,
-                VerticalAlignment = VerticalAlignment.Top
-            };
-            windowButtons.Children.Add(minimize);
-            windowButtons.Children.Add(close);
-            Grid.SetColumn(windowButtons, 1);
-            header.Children.Add(windowButtons);
-            return header;
-        }
 
 
 
