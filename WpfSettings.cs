@@ -33,7 +33,6 @@ namespace TypeBridgeApp
         private HotkeyCapture activeCapture;
         private readonly Switch linkSwitch = new Switch();
         private readonly ScreenArranger arranger = new ScreenArranger();
-        private readonly List<Button> edgeButtons = new List<Button>();
         private readonly TextBlock errorText = new TextBlock();
         private readonly string initialEdge;
 
@@ -214,12 +213,9 @@ namespace TypeBridgeApp
             UIElement layoutCard = Card("屏幕排列", layoutBody);
             arranger.Edge = initialEdge;
             layoutBody.Children.Add(arranger);
-            layoutBody.Children.Add(BuildEdgeRow());
-            TextBlock hint = Note("点方向按钮，或直接拖动 Ubuntu 方块，松手后吸附到最近的边（上下左右都行）");
+            TextBlock hint = Note("按住 Ubuntu 方块拖到本机的任意一侧，靠近时自动吸附，松手生效");
             hint.Margin = new Thickness(0, 8, 0, 0);
             layoutBody.Children.Add(hint);
-            arranger.Changed += RefreshEdgeButtons;
-            RefreshEdgeButtons();
             stack.Children.Add(layoutCard);
 
             StackPanel fileBody = new StackPanel();
@@ -390,49 +386,11 @@ namespace TypeBridgeApp
             return header;
         }
 
-        /// <summary>四个方向按钮：点一下就换边，省得靠拖动猜。</summary>
-        private UIElement BuildEdgeRow()
-        {
-            StackPanel row = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
-                Margin = new Thickness(0, 10, 0, 0)
-            };
-            row.Children.Add(EdgeButton("左", "left"));
-            row.Children.Add(EdgeButton("上", "top"));
-            row.Children.Add(EdgeButton("下", "bottom"));
-            row.Children.Add(EdgeButton("右", "right"));
-            return row;
-        }
 
-        private Button EdgeButton(string label, string edge)
-        {
-            Button button = SecondaryButton(label);
-            button.MinWidth = 62;
-            button.Height = 34;
-            button.Padding = new Thickness(0);
-            button.Margin = new Thickness(0, 0, 8, 0);
-            button.Tag = edge;
-            button.Click += delegate
-            {
-                arranger.Edge = edge;
-            };
-            edgeButtons.Add(button);
-            return button;
-        }
 
-        private void RefreshEdgeButtons()
-        {
-            string current = arranger.Edge;
-            foreach (Button button in edgeButtons)
-            {
-                bool active = string.Equals((string)button.Tag, current, StringComparison.Ordinal);
-                button.Background = active ? new SolidColorBrush(Accent) : Brushes.White;
-                button.Foreground = active ? Brushes.White : new SolidColorBrush(Color.FromRgb(58, 72, 96));
-                button.BorderBrush = active ? new SolidColorBrush(Accent)
-                    : new SolidColorBrush(Color.FromRgb(216, 224, 238));
-            }
-        }
+
+
+
 
         private UIElement BuildAddressCard()
         {
@@ -915,32 +873,31 @@ namespace TypeBridgeApp
         }
 
         /// <summary>两块屏幕的摆放区，可拖动吸附。</summary>
+        /// <summary>
+        /// 两块屏幕的摆放区，交互参照 Windows 的显示器排列：
+        /// 按住 Ubuntu 方块随便拖，靠近某一侧会吸附，松手后按最近的一侧决定切屏方向。
+        /// </summary>
         private sealed class ScreenArranger : Canvas
         {
-            private const double BoxW = 132;    // 接近 16:10 的显示器比例
+            private const double BoxW = 132;
             private const double BoxH = 82;
-            private const double Gap = 16;
-            private const double ShortH = 116;  // 左右排列：一块的高度 + 上下留白
-            private const double TallH = 196;   // 上下排列：两块 + 间隙 + 留白
+            private const double Gap = 18;
+            private const double CanvasH = 232;   // 固定高度：四个方向都得留出拖动空间
+            private const double Magnet = 26;     // 离吸附位多近就自动吸上去
+            private const double Padding = 4;
 
             private readonly Border windows = MakeBox(true);
             private readonly Border ubuntu = MakeBox(false);
             private string edge = "right";
             private bool dragging;
-            private Point origin;
-            private Point start;
+            private Point grab;                   // 按下时鼠标相对方块左上角的偏移
+
+            internal event Action Changed;
 
             private double ViewWidth
             {
                 get { return ActualWidth > 1 ? ActualWidth : 400; }
             }
-
-            private double ViewHeight
-            {
-                get { return Height > 1 ? Height : ShortH; }
-            }
-
-            internal event Action Changed;
 
             internal string Edge
             {
@@ -949,15 +906,13 @@ namespace TypeBridgeApp
                 {
                     edge = NormalizeEdge(value);
                     Arrange();
-                    Action handler = Changed;
-                    if (handler != null)
-                        handler();
+                    Notify();
                 }
             }
 
             internal ScreenArranger()
             {
-                Height = ShortH;
+                Height = CanvasH;
                 MinWidth = 300;
                 HorizontalAlignment = HorizontalAlignment.Stretch;
                 Background = Brushes.Transparent;
@@ -966,93 +921,155 @@ namespace TypeBridgeApp
                 Children.Add(ubuntu);
                 Children.Add(windows);
 
+                ubuntu.Cursor = Cursors.Hand;
                 ubuntu.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e)
                 {
-                    // 左右排列时画布只有一块的高度，往上下根本拖不动（最多十几像素），
-                    // 所以按下先把画布撑到能上下摆，松手吸附后再收回去。
-                    if (Height < TallH)
-                    {
-                        Height = TallH;
-                        Arrange();
-                    }
                     dragging = true;
-                    origin = new Point(GetLeft(ubuntu), GetTop(ubuntu));
-                    start = e.GetPosition(this);
+                    Point now = e.GetPosition(this);
+                    grab = new Point(now.X - GetLeft(ubuntu), now.Y - GetTop(ubuntu));
                     ubuntu.CaptureMouse();
                     e.Handled = true;
                 };
                 ubuntu.MouseMove += delegate(object s, MouseEventArgs e)
                 {
-                    if (!dragging) return;
-                    Point now = e.GetPosition(this);
-                    SetLeft(ubuntu, Clamp(origin.X + (now.X - start.X), 4, ViewWidth - BoxW - 4));
-                    SetTop(ubuntu, Clamp(origin.Y + (now.Y - start.Y), 4, ViewHeight - BoxH - 4));
+                    if (!dragging)
+                        return;
+                    DragTo(e.GetPosition(this));
                 };
                 ubuntu.MouseLeftButtonUp += delegate
                 {
-                    if (!dragging) return;
+                    if (!dragging)
+                        return;
                     dragging = false;
                     ubuntu.ReleaseMouseCapture();
-                    Snap();
+                    CommitDrop();
                 };
 
-                // 窗口宽度被拖动后重新居中，不再有固定 470 的画布撑破卡片
                 SizeChanged += delegate(object s, SizeChangedEventArgs e)
                 {
-                    if (e.WidthChanged) Arrange();
+                    if (e.WidthChanged)
+                        Arrange();
                 };
+
                 Arrange();
             }
 
-            // Canvas 默认不按子元素计算尺寸；不覆写的话去掉固定 Width 后会被父容器压成 0 宽。
-            // 但必须先让基类测量两个方块，否则子元素 DesiredSize 为 0，安排出来就是 0×0（看不见）。
+            // Canvas 不按子元素算尺寸，必须自己给宽高，否则会被父容器压成 0。
             protected override Size MeasureOverride(Size constraint)
             {
                 base.MeasureOverride(constraint);
                 double width = double.IsInfinity(constraint.Width) ? 400 : constraint.Width;
-                return new Size(Math.Max(width, BoxW * 2 + Gap + 12), ViewHeight);
+                return new Size(Math.Max(width, BoxW * 2 + Gap + 12), CanvasH);
             }
 
-            private static double Clamp(double value, double min, double max)
+            /// <summary>把方块拖到光标处（鼠标移动与自动化测试共用同一套逻辑）。</summary>
+            private void DragTo(Point cursor)
             {
-                if (max < min) max = min;
-                return value < min ? min : (value > max ? max : value);
+                double x = Clamp(cursor.X - grab.X, Padding, ViewWidth - BoxW - Padding);
+                double y = Clamp(cursor.Y - grab.Y, Padding, CanvasH - BoxH - Padding);
+
+                // 靠到某个摆位上就吸过去；吸附后重算抓取偏移，方块才不会跟手打架
+                double snapX, snapY;
+                NearestSide(x, y, out snapX, out snapY);
+                double offsetX = x - snapX;
+                double offsetY = y - snapY;
+                if (Math.Sqrt(offsetX * offsetX + offsetY * offsetY) < Magnet)
+                {
+                    x = snapX;
+                    y = snapY;
+                    grab = new Point(cursor.X - x, cursor.Y - y);
+                }
+
+                SetLeft(ubuntu, x);
+                SetTop(ubuntu, y);
             }
 
-            private void Snap()
+            /// <summary>松手：按离得最近的一侧落位。</summary>
+            private void CommitDrop()
             {
-                double left = GetLeft(ubuntu);
-                double top = GetTop(ubuntu);
-                double winLeft = GetLeft(windows);
-                double winTop = GetTop(windows);
-                double dx = (left + BoxW / 2) - (winLeft + BoxW / 2);
-                double dy = (top + BoxH / 2) - (winTop + BoxH / 2);
-                if (Math.Abs(dx) >= Math.Abs(dy))
-                    edge = dx < 0 ? "left" : "right";
-                else
-                    edge = dy < 0 ? "top" : "bottom";
+                edge = NearestSide(GetLeft(ubuntu), GetTop(ubuntu));
                 Arrange();
+                Notify();
+            }
+
+            private void Notify()
+            {
                 Action handler = Changed;
                 if (handler != null)
                     handler();
             }
 
+            private static double Clamp(double value, double min, double max)
+            {
+                if (max < min)
+                    max = min;
+                return value < min ? min : (value > max ? max : value);
+            }
+
+            /// <summary>某一侧的规范摆位（返回 Ubuntu 方块的左上角坐标）。</summary>
+            private void Canonical(string side, out double x, out double y)
+            {
+                double width = ViewWidth;
+                double pairX = Math.Max(Padding, (width - (BoxW * 2 + Gap)) / 2);
+                double pairY = (CanvasH - (BoxH * 2 + Gap)) / 2;
+                double centerX = Math.Max(Padding, (width - BoxW) / 2);
+                double centerY = (CanvasH - BoxH) / 2;
+
+                switch (side)
+                {
+                    case "left":
+                        x = pairX; y = centerY; break;
+                    case "right":
+                        x = pairX + BoxW + Gap; y = centerY; break;
+                    case "top":
+                        x = centerX; y = pairY; break;
+                    default:
+                        x = centerX; y = pairY + BoxH + Gap; break;
+                }
+            }
+
+            private string NearestSide(double x, double y, out double snapX, out double snapY)
+            {
+                string best = edge;
+                double bestDistance = double.MaxValue;
+                double bx = x;
+                double by = y;
+                string[] sides = new string[] { "left", "right", "top", "bottom" };
+                foreach (string side in sides)
+                {
+                    double cx, cy;
+                    Canonical(side, out cx, out cy);
+                    double dx = x - cx;
+                    double dy = y - cy;
+                    double distance = Math.Sqrt(dx * dx + dy * dy);
+                    if (distance < bestDistance)
+                    {
+                        bestDistance = distance;
+                        best = side;
+                        bx = cx;
+                        by = cy;
+                    }
+                }
+                snapX = bx;
+                snapY = by;
+                return best;
+            }
+
+            private string NearestSide(double x, double y)
+            {
+                double snapX, snapY;
+                return NearestSide(x, y, out snapX, out snapY);
+            }
+
             private void Arrange()
             {
-                // 只在上下排列时才把画布撑高，左右排列保持紧凑的正常比例
-                double targetH = (edge == "top" || edge == "bottom") ? TallH : ShortH;
-                if (Math.Abs(Height - targetH) > 0.5) Height = targetH;
+                double width = ViewWidth;
+                double pairX = Math.Max(Padding, (width - (BoxW * 2 + Gap)) / 2);
+                double pairY = (CanvasH - (BoxH * 2 + Gap)) / 2;
+                double centerX = Math.Max(Padding, (width - BoxW) / 2);
+                double centerY = (CanvasH - BoxH) / 2;
 
-                double w = ViewWidth;
-                double h = ViewHeight;
-                double pairW = BoxW * 2 + Gap;
-                double pairH = BoxH * 2 + Gap;
-                double pairX = (w - pairW) / 2;
-                double pairY = (h - pairH) / 2;
-
-                double winX = (w - BoxW) / 2, winY = (h - BoxH) / 2;
-                double ubuX = winX, ubuY = winY;
-
+                double winX = centerX, winY = centerY, ubuX = centerX, ubuY = centerY;
                 switch (edge)
                 {
                     case "left":
@@ -1060,25 +1077,14 @@ namespace TypeBridgeApp
                     case "right":
                         winX = pairX; ubuX = pairX + BoxW + Gap; break;
                     case "top":
-                        winX = ubuX = (w - BoxW) / 2;
                         ubuY = pairY; winY = pairY + BoxH + Gap; break;
                     default:
-                        winX = ubuX = (w - BoxW) / 2;
                         winY = pairY; ubuY = pairY + BoxH + Gap; break;
                 }
 
-                // 窗口被拖窄到放不下两块时整体平移；左右、上下都夹在画布内
-                double minX = Math.Min(winX, ubuX);
-                double minY = Math.Min(winY, ubuY);
-                double maxX = Math.Max(winX, ubuX) + BoxW;
-                double maxY = Math.Max(winY, ubuY) + BoxH;
-                double shiftX = minX < 4 ? 4 - minX : (maxX > w - 4 ? w - 4 - maxX : 0);
-                double shiftY = minY < 4 ? 4 - minY : (maxY > h - 4 ? h - 4 - maxY : 0);
-
-                SetLeft(windows, winX + shiftX); SetTop(windows, winY + shiftY);
-                SetLeft(ubuntu, ubuX + shiftX); SetTop(ubuntu, ubuY + shiftY);
+                SetLeft(windows, winX); SetTop(windows, winY);
+                SetLeft(ubuntu, ubuX); SetTop(ubuntu, ubuY);
             }
-
 
             private static Border MakeBox(bool isWindows)
             {

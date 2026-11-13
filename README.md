@@ -208,6 +208,7 @@ edge_switch=none
 - `file_port`：Windows→Ubuntu 的文件传输端口（Ubuntu→Windows 方向固定监听 4323）。
 - `recv_dir`：从 Ubuntu 收到的文件存放目录，留空表示 `下载\typebridge`。
 - `edge_switch`：边缘切换方向，`none`（默认，关闭）/ `left` / `right` / `top` / `bottom`。
+  设置窗口里的「屏幕排列」可以直接把 Ubuntu 方块拖到本机的任意一侧（靠近时自动吸附），松手即生效，不需要改 ini。
 
 该文件不会提交到 Git 仓库；也可以直接在设置窗口里改，保存后立即生效。快捷键在设置窗口中点击输入框、按下组合键即可录制，至少需要包含 Ctrl、Alt 或 Shift 之一；普通键盘没有 F13–F24，如果想用一个几乎不会和任何软件冲突的整键做切换键，可以不带修饰键单独使用 **ScrollLock**、**Pause** 或 **Menu**（在设置里直接按对应键即可），也可以在配置文件里手写 `keyboard_hotkey=ScrollLock` 或 `Win+Pause`（F13–F24 同样只支持手写）。
 
@@ -387,7 +388,7 @@ Windows 端使用低级键盘与鼠标钩子：
 在 Ubuntu 上执行：
 
 ```bash
-VERSION=3.5.17 bash ubuntu/build-deb.sh
+VERSION=3.5.18 bash ubuntu/build-deb.sh
 ```
 
 生成：
