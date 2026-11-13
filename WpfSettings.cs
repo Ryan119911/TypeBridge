@@ -185,6 +185,19 @@ namespace TypeBridgeApp
 
         // ---------- 结构 ----------
 
+        /// <summary>事件是否来自"屏幕排列"控件（窗口拖动要避开它）。</summary>
+        private bool FromArranger(object source)
+        {
+            DependencyObject node = source as DependencyObject;
+            while (node != null)
+            {
+                if (object.ReferenceEquals(node, arranger))
+                    return true;
+                node = VisualTreeHelper.GetParent(node);
+            }
+            return false;
+        }
+
         private UIElement BuildContent()
         {
             Border shell = new Border
@@ -194,7 +207,13 @@ namespace TypeBridgeApp
                 Background = new LinearGradientBrush(
                     Color.FromRgb(255, 255, 255), Color.FromRgb(240, 245, 253), new Point(0, 0), new Point(0.3, 1))
             };
-            shell.MouseLeftButtonDown += delegate { try { DragMove(); } catch { } };
+            shell.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e)
+            {
+                // 点在"屏幕排列"的方块上是要拖方块，不能顺手把整个窗口拖走
+                if (FromArranger(e.OriginalSource))
+                    return;
+                try { DragMove(); } catch { }
+            };
 
             StackPanel stack = new StackPanel { Margin = new Thickness(22, 18, 22, 20) };
 
@@ -883,7 +902,7 @@ namespace TypeBridgeApp
             private const double BoxH = 82;
             private const double Gap = 18;
             private const double CanvasH = 232;   // 固定高度：四个方向都得留出拖动空间
-            private const double Magnet = 26;     // 离吸附位多近就自动吸上去
+            private const double Magnet = 14;     // 离吸附位多近就自动吸上去
             private const double Padding = 4;
 
             private readonly Border windows = MakeBox(true);
@@ -921,27 +940,43 @@ namespace TypeBridgeApp
                 Children.Add(ubuntu);
                 Children.Add(windows);
 
-                ubuntu.Cursor = Cursors.Hand;
-                ubuntu.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e)
+                // 拖动挂在整块画布的 PreviewMouseDown（真隧道事件）上，并捕获画布自己：
+                // MouseLeftButtonDown / PreviewMouseLeftButtonDown 都是 Direct 事件，
+                // 设 Handled 拦不住上层的窗口拖动，所以这里必须用 MouseDown。
+                PreviewMouseDown += delegate(object s, MouseButtonEventArgs e)
                 {
+                    if (e.ChangedButton != MouseButton.Left)
+                        return;
+                    Point point = e.GetPosition(this);
+                    if (!InsideUbuntu(point))
+                        return;
                     dragging = true;
-                    Point now = e.GetPosition(this);
-                    grab = new Point(now.X - GetLeft(ubuntu), now.Y - GetTop(ubuntu));
-                    ubuntu.CaptureMouse();
+                    grab = new Point(point.X - GetLeft(ubuntu), point.Y - GetTop(ubuntu));
+                    CaptureMouse();
                     e.Handled = true;
                 };
-                ubuntu.MouseMove += delegate(object s, MouseEventArgs e)
+                PreviewMouseMove += delegate(object s, MouseEventArgs e)
                 {
                     if (!dragging)
                         return;
                     DragTo(e.GetPosition(this));
+                    e.Handled = true;
                 };
-                ubuntu.MouseLeftButtonUp += delegate
+                PreviewMouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
                 {
                     if (!dragging)
                         return;
                     dragging = false;
-                    ubuntu.ReleaseMouseCapture();
+                    ReleaseMouseCapture();
+                    CommitDrop();
+                    e.Handled = true;
+                };
+                LostMouseCapture += delegate
+                {
+                    // 被别的元素抢走捕获时也要落位，不能让方块停在半路
+                    if (!dragging)
+                        return;
+                    dragging = false;
                     CommitDrop();
                 };
 
@@ -960,6 +995,15 @@ namespace TypeBridgeApp
                 base.MeasureOverride(constraint);
                 double width = double.IsInfinity(constraint.Width) ? 400 : constraint.Width;
                 return new Size(Math.Max(width, BoxW * 2 + Gap + 12), CanvasH);
+            }
+
+            /// <summary>点在 Ubuntu 方块里（画布坐标系）。</summary>
+            private bool InsideUbuntu(Point point)
+            {
+                double left = GetLeft(ubuntu);
+                double top = GetTop(ubuntu);
+                return point.X >= left && point.X <= left + BoxW
+                    && point.Y >= top && point.Y <= top + BoxH;
             }
 
             /// <summary>把方块拖到光标处（鼠标移动与自动化测试共用同一套逻辑）。</summary>

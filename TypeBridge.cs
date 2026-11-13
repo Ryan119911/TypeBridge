@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.5.19.0")]
+[assembly: AssemblyVersion("3.5.20.0")]
 
 namespace TypeBridgeApp
 {
@@ -3098,6 +3098,8 @@ namespace TypeBridgeApp
             mouseHook.ReleaseAll();
             mouseHook.Enabled = false;
             mouseHook.RestoreCursor();
+            // 设置窗口里要拖方块、点按钮，别让边缘切屏把鼠标抢走
+            mouseHook.Watching = false;
             mouseMode = false;
             hotkeyForm.SuspendHotkeys();
             UpdateStatus();
@@ -3133,6 +3135,7 @@ namespace TypeBridgeApp
             finally
             {
                 ApplyHotkeys();
+                mouseHook.Watching = edgeSwitch && stream != null && !mouseMode;
                 SetKeyboardMode(resumeKeyboard, false);
                 if (linkMouse ? resumeKeyboard : resumeMouse)
                     SetMouseMode(true, false);
