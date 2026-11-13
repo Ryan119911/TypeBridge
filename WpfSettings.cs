@@ -33,6 +33,7 @@ namespace TypeBridgeApp
         private HotkeyCapture activeCapture;
         private readonly Switch linkSwitch = new Switch();
         private readonly ScreenArranger arranger = new ScreenArranger();
+        private readonly List<Button> edgeButtons = new List<Button>();
         private readonly TextBlock errorText = new TextBlock();
         private readonly string initialEdge;
 
@@ -213,9 +214,12 @@ namespace TypeBridgeApp
             UIElement layoutCard = Card("屏幕排列", layoutBody);
             arranger.Edge = initialEdge;
             layoutBody.Children.Add(arranger);
-            TextBlock hint = Note("拖动 Ubuntu 方块摆放位置，松手后吸附到最近的边");
+            layoutBody.Children.Add(BuildEdgeRow());
+            TextBlock hint = Note("点方向按钮，或直接拖动 Ubuntu 方块，松手后吸附到最近的边（上下左右都行）");
             hint.Margin = new Thickness(0, 8, 0, 0);
             layoutBody.Children.Add(hint);
+            arranger.Changed += RefreshEdgeButtons;
+            RefreshEdgeButtons();
             stack.Children.Add(layoutCard);
 
             StackPanel fileBody = new StackPanel();
@@ -384,6 +388,50 @@ namespace TypeBridgeApp
             Grid.SetColumn(windowButtons, 1);
             header.Children.Add(windowButtons);
             return header;
+        }
+
+        /// <summary>四个方向按钮：点一下就换边，省得靠拖动猜。</summary>
+        private UIElement BuildEdgeRow()
+        {
+            StackPanel row = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 10, 0, 0)
+            };
+            row.Children.Add(EdgeButton("左", "left"));
+            row.Children.Add(EdgeButton("上", "top"));
+            row.Children.Add(EdgeButton("下", "bottom"));
+            row.Children.Add(EdgeButton("右", "right"));
+            return row;
+        }
+
+        private Button EdgeButton(string label, string edge)
+        {
+            Button button = SecondaryButton(label);
+            button.MinWidth = 62;
+            button.Height = 34;
+            button.Padding = new Thickness(0);
+            button.Margin = new Thickness(0, 0, 8, 0);
+            button.Tag = edge;
+            button.Click += delegate
+            {
+                arranger.Edge = edge;
+            };
+            edgeButtons.Add(button);
+            return button;
+        }
+
+        private void RefreshEdgeButtons()
+        {
+            string current = arranger.Edge;
+            foreach (Button button in edgeButtons)
+            {
+                bool active = string.Equals((string)button.Tag, current, StringComparison.Ordinal);
+                button.Background = active ? new SolidColorBrush(Accent) : Brushes.White;
+                button.Foreground = active ? Brushes.White : new SolidColorBrush(Color.FromRgb(58, 72, 96));
+                button.BorderBrush = active ? new SolidColorBrush(Accent)
+                    : new SolidColorBrush(Color.FromRgb(216, 224, 238));
+            }
         }
 
         private UIElement BuildAddressCard()
@@ -892,10 +940,19 @@ namespace TypeBridgeApp
                 get { return Height > 1 ? Height : ShortH; }
             }
 
+            internal event Action Changed;
+
             internal string Edge
             {
                 get { return edge; }
-                set { edge = NormalizeEdge(value); Arrange(); }
+                set
+                {
+                    edge = NormalizeEdge(value);
+                    Arrange();
+                    Action handler = Changed;
+                    if (handler != null)
+                        handler();
+                }
             }
 
             internal ScreenArranger()
@@ -911,6 +968,13 @@ namespace TypeBridgeApp
 
                 ubuntu.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e)
                 {
+                    // 左右排列时画布只有一块的高度，往上下根本拖不动（最多十几像素），
+                    // 所以按下先把画布撑到能上下摆，松手吸附后再收回去。
+                    if (Height < TallH)
+                    {
+                        Height = TallH;
+                        Arrange();
+                    }
                     dragging = true;
                     origin = new Point(GetLeft(ubuntu), GetTop(ubuntu));
                     start = e.GetPosition(this);
@@ -968,6 +1032,9 @@ namespace TypeBridgeApp
                 else
                     edge = dy < 0 ? "top" : "bottom";
                 Arrange();
+                Action handler = Changed;
+                if (handler != null)
+                    handler();
             }
 
             private void Arrange()
