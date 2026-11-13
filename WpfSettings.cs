@@ -35,6 +35,7 @@ namespace TypeBridgeApp
         private readonly ScreenArranger arranger = new ScreenArranger();
         private readonly TextBlock errorText = new TextBlock();
         private readonly string initialEdge;
+        private readonly string initialOffset;
 
         private bool linkMouse;
 
@@ -48,6 +49,9 @@ namespace TypeBridgeApp
         internal string RecvDir { get; private set; }
         internal string RemoteDir { get; private set; }
         internal string SwitchEdge { get { return arranger.Edge; } }
+
+        /// <summary>方块相对本机的偏移（"dx,dy"），用于把摆放位置存进配置。</summary>
+        internal string LayoutOffset { get { return arranger.OffsetText; } }
         internal bool LinkMouse { get { return linkMouse; } }
 
         /// <summary>只接受守护进程认识的四个方向，缺省与 BridgeApplicationContext 一致（Ubuntu 在右）。</summary>
@@ -59,7 +63,8 @@ namespace TypeBridgeApp
         }
 
         internal WpfSettingsWindow(string host, int port, Hotkey keyboardHotkey, Hotkey mouseHotkey,
-            bool linkMouseValue, string switchEdgeValue, string recvDirValue, string remoteDirValue, bool firstRun)
+            bool linkMouseValue, string switchEdgeValue, string recvDirValue, string remoteDirValue,
+            bool firstRun, string layoutOffsetValue)
         {
             Host = host;
             Port = port;
@@ -69,6 +74,7 @@ namespace TypeBridgeApp
             RemoteDir = remoteDirValue ?? string.Empty;
             linkMouse = linkMouseValue;
             initialEdge = NormalizeEdge(switchEdgeValue);
+            initialOffset = layoutOffsetValue ?? string.Empty;
 
             Title = firstRun ? "TypeBridge 首次设置" : "TypeBridge 设置";
             // 普通窗口：标题栏、最小化/最大化/关闭、四边缩放全部交给系统，
@@ -79,7 +85,6 @@ namespace TypeBridgeApp
             ResizeMode = ResizeMode.CanResize;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             ShowInTaskbar = true;   // 最小化后才能从任务栏恢复
-            Topmost = true;
             Width = 560;
             Height = Math.Min(780, SystemParameters.WorkArea.Height - 80);
             MinWidth = 470;
@@ -102,6 +107,32 @@ namespace TypeBridgeApp
 
             Content = BuildContent();
             PreviewKeyDown += OnWindowKeyDown;
+
+            // 拖动"屏幕排列"里的方块：挂在窗口级 Preview 事件上，
+            // 这样不依赖画布/方块自己能不能收到鼠标事件（窗口一定能收到）。
+            // 按住方块期间用定时器轮询光标位置来移动它：不依赖 MouseMove 事件
+            // （按下并捕获鼠标后，实测移动事件并不会稳定送到窗口，方块就"拖不动"）。
+            dragPoller.Interval = TimeSpan.FromMilliseconds(16);
+            dragPoller.Tick += delegate { PollDrag(); };
+
+            PreviewMouseDown += delegate(object s, MouseButtonEventArgs e)
+            {
+                if (e.ChangedButton != MouseButton.Left)
+                    return;
+                if (arranger.BeginDrag(e.GetPosition(arranger)))
+                {
+                    e.Handled = true;
+                    dragPoller.Start();
+                }
+            };
+            PreviewMouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+            {
+                if (!arranger.IsDragging)
+                    return;
+                dragPoller.Stop();
+                arranger.EndDrag();
+                e.Handled = true;
+            };
         }
 
         /// <summary>Win11 下让 DWM 给系统窗口画圆角；Win10 不认识这个属性，直接忽略。</summary>
@@ -176,6 +207,20 @@ namespace TypeBridgeApp
             e.Handled = true;
         }
 
+        private readonly System.Windows.Threading.DispatcherTimer dragPoller =
+            new System.Windows.Threading.DispatcherTimer();
+
+        /// <summary>按住方块时每 16ms 取一次光标位置推着方块走。</summary>
+        private void PollDrag()
+        {
+            if (!arranger.IsDragging)
+            {
+                dragPoller.Stop();
+                return;
+            }
+            arranger.DragTo(System.Windows.Input.Mouse.GetPosition(arranger));
+        }
+
         // ---------- 结构 ----------
 
 
@@ -211,8 +256,11 @@ namespace TypeBridgeApp
             StackPanel layoutBody = new StackPanel();
             UIElement layoutCard = Card("屏幕排列", layoutBody);
             arranger.Edge = initialEdge;
+            double offsetX, offsetY;
+            if (TryParseOffset(initialOffset, out offsetX, out offsetY))
+                arranger.SetOffset(offsetX, offsetY);
             layoutBody.Children.Add(arranger);
-            TextBlock hint = Note("按住 Ubuntu 方块拖到本机的任意一侧，靠近时自动吸附，松手生效");
+            TextBlock hint = Note("按住 Ubuntu 方块拖到任意位置：上下左右或四个角都行，靠近整齐位置会自动吸附");
             hint.Margin = new Thickness(0, 8, 0, 0);
             layoutBody.Children.Add(hint);
             stack.Children.Add(layoutCard);
@@ -282,6 +330,20 @@ namespace TypeBridgeApp
 
 
 
+
+        /// <summary>解析 "dx,dy" 形式的偏移，非法就返回 false。</summary>
+        private static bool TryParseOffset(string text, out double x, out double y)
+        {
+            x = 0;
+            y = 0;
+            if (string.IsNullOrEmpty(text))
+                return false;
+            string[] parts = text.Split(',');
+            if (parts.Length != 2)
+                return false;
+            return double.TryParse(parts[0].Trim(), out x)
+                && double.TryParse(parts[1].Trim(), out y);
+        }
 
         private UIElement BuildAddressCard()
         {
@@ -768,20 +830,28 @@ namespace TypeBridgeApp
         /// 两块屏幕的摆放区，交互参照 Windows 的显示器排列：
         /// 按住 Ubuntu 方块随便拖，靠近某一侧会吸附，松手后按最近的一侧决定切屏方向。
         /// </summary>
+        /// <summary>
+        /// 两块屏幕的摆放区，交互参照 Windows 的显示器排列：
+        /// 按住 Ubuntu 方块拖到任意位置（上、下、左、右和四个角都行），
+        /// 靠近整齐位置时自动吸附，松手后按偏移的主方向决定切屏边。
+        /// </summary>
         private sealed class ScreenArranger : Canvas
         {
             private const double BoxW = 132;
             private const double BoxH = 82;
             private const double Gap = 18;
-            private const double CanvasH = 232;   // 固定高度：四个方向都得留出拖动空间
-            private const double Magnet = 14;     // 离吸附位多近就自动吸上去
+            private const double CanvasH = 232;
+            private const double Magnet = 18;      // 离整齐位置多近就吸过去
             private const double Padding = 4;
 
             private readonly Border windows = MakeBox(true);
             private readonly Border ubuntu = MakeBox(false);
             private string edge = "right";
+            private double offsetX = BoxW + Gap;   // Ubuntu 相对 Windows 的偏移
+            private double offsetY;
             private bool dragging;
-            private Point grab;                   // 按下时鼠标相对方块左上角的偏移
+            private bool dragLogged;
+            private Point grab;
 
             internal event Action Changed;
 
@@ -796,6 +866,7 @@ namespace TypeBridgeApp
                 set
                 {
                     edge = NormalizeEdge(value);
+                    SetOffsetForEdge(edge);
                     Arrange();
                     Notify();
                 }
@@ -812,40 +883,9 @@ namespace TypeBridgeApp
                 Children.Add(ubuntu);
                 Children.Add(windows);
 
-                // 拖动挂在整块画布的 PreviewMouseDown（真隧道事件）上，并捕获画布自己：
-                // MouseLeftButtonDown / PreviewMouseLeftButtonDown 都是 Direct 事件，
-                // 设 Handled 拦不住上层的窗口拖动，所以这里必须用 MouseDown。
-                PreviewMouseDown += delegate(object s, MouseButtonEventArgs e)
-                {
-                    if (e.ChangedButton != MouseButton.Left)
-                        return;
-                    Point point = e.GetPosition(this);
-                    if (!InsideUbuntu(point))
-                        return;
-                    dragging = true;
-                    grab = new Point(point.X - GetLeft(ubuntu), point.Y - GetTop(ubuntu));
-                    CaptureMouse();
-                    e.Handled = true;
-                };
-                PreviewMouseMove += delegate(object s, MouseEventArgs e)
-                {
-                    if (!dragging)
-                        return;
-                    DragTo(e.GetPosition(this));
-                    e.Handled = true;
-                };
-                PreviewMouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
-                {
-                    if (!dragging)
-                        return;
-                    dragging = false;
-                    ReleaseMouseCapture();
-                    CommitDrop();
-                    e.Handled = true;
-                };
+                // 拖动由窗口级事件驱动（见 WpfSettingsWindow），这里只兜底捕获丢失
                 LostMouseCapture += delegate
                 {
-                    // 被别的元素抢走捕获时也要落位，不能让方块停在半路
                     if (!dragging)
                         return;
                     dragging = false;
@@ -869,43 +909,26 @@ namespace TypeBridgeApp
                 return new Size(Math.Max(width, BoxW * 2 + Gap + 12), CanvasH);
             }
 
-            /// <summary>点在 Ubuntu 方块里（画布坐标系）。</summary>
-            private bool InsideUbuntu(Point point)
+            /// <summary>当前偏移，形如 "150,-100"。</summary>
+            internal string OffsetText
             {
-                double left = GetLeft(ubuntu);
-                double top = GetTop(ubuntu);
-                return point.X >= left && point.X <= left + BoxW
-                    && point.Y >= top && point.Y <= top + BoxH;
-            }
-
-            /// <summary>把方块拖到光标处（鼠标移动与自动化测试共用同一套逻辑）。</summary>
-            private void DragTo(Point cursor)
-            {
-                double x = Clamp(cursor.X - grab.X, Padding, ViewWidth - BoxW - Padding);
-                double y = Clamp(cursor.Y - grab.Y, Padding, CanvasH - BoxH - Padding);
-
-                // 靠到某个摆位上就吸过去；吸附后重算抓取偏移，方块才不会跟手打架
-                double snapX, snapY;
-                NearestSide(x, y, out snapX, out snapY);
-                double offsetX = x - snapX;
-                double offsetY = y - snapY;
-                if (Math.Sqrt(offsetX * offsetX + offsetY * offsetY) < Magnet)
+                get
                 {
-                    x = snapX;
-                    y = snapY;
-                    grab = new Point(cursor.X - x, cursor.Y - y);
+                    return offsetX.ToString("0") + "," + offsetY.ToString("0");
                 }
-
-                SetLeft(ubuntu, x);
-                SetTop(ubuntu, y);
             }
 
-            /// <summary>松手：按离得最近的一侧落位。</summary>
-            private void CommitDrop()
+            /// <summary>直接设定偏移（用于读回上次保存的摆放位置）。</summary>
+            internal void SetOffset(double dx, double dy)
             {
-                edge = NearestSide(GetLeft(ubuntu), GetTop(ubuntu));
-                Arrange();
-                Notify();
+                offsetX = dx;
+                offsetY = dy;
+                CommitDrop();
+            }
+
+            internal bool IsDragging
+            {
+                get { return dragging; }
             }
 
             private void Notify()
@@ -922,84 +945,172 @@ namespace TypeBridgeApp
                 return value < min ? min : (value > max ? max : value);
             }
 
-            /// <summary>某一侧的规范摆位（返回 Ubuntu 方块的左上角坐标）。</summary>
-            private void Canonical(string side, out double x, out double y)
+            /// <summary>按切屏方向给出标准偏移（只有四条边）。</summary>
+            private void SetOffsetForEdge(string side)
             {
-                double width = ViewWidth;
-                double pairX = Math.Max(Padding, (width - (BoxW * 2 + Gap)) / 2);
-                double pairY = (CanvasH - (BoxH * 2 + Gap)) / 2;
-                double centerX = Math.Max(Padding, (width - BoxW) / 2);
-                double centerY = (CanvasH - BoxH) / 2;
-
+                double stepX = BoxW + Gap;
+                double stepY = BoxH + Gap;
+                offsetX = 0;
+                offsetY = 0;
                 switch (side)
                 {
-                    case "left":
-                        x = pairX; y = centerY; break;
-                    case "right":
-                        x = pairX + BoxW + Gap; y = centerY; break;
-                    case "top":
-                        x = centerX; y = pairY; break;
-                    default:
-                        x = centerX; y = pairY + BoxH + Gap; break;
+                    case "left": offsetX = -stepX; break;
+                    case "right": offsetX = stepX; break;
+                    case "top": offsetY = -stepY; break;
+                    default: offsetY = stepY; break;
                 }
             }
 
-            private string NearestSide(double x, double y, out double snapX, out double snapY)
+            /// <summary>Windows 方块的中心（画布坐标）。</summary>
+            private Point WindowsCenter
             {
-                string best = edge;
-                double bestDistance = double.MaxValue;
+                get
+                {
+                    double width = ViewWidth;
+                    return new Point(width / 2, CanvasH / 2);
+                }
+            }
+
+            /// <summary>按下时调用：点在方块上就开始拖，返回是否接管了这次按下。</summary>
+            internal bool BeginDrag(Point point)
+            {
+                double left = GetLeft(ubuntu);
+                double top = GetTop(ubuntu);
+                if (double.IsNaN(left) || double.IsNaN(top))
+                    return false;
+                if (point.X < left || point.X > left + BoxW || point.Y < top || point.Y > top + BoxH)
+                    return false;
+
+                dragging = true;
+                dragLogged = false;
+                grab = new Point(point.X - left, point.Y - top);
+                CaptureMouse();
+                Log.Write("arranger drag start point=" + point.X.ToString("0") + ","
+                    + point.Y.ToString("0") + " box=" + left.ToString("0") + ","
+                    + top.ToString("0") + " width=" + ActualWidth.ToString("0"));
+                return true;
+            }
+
+            /// <summary>松手时调用：按主方向定切屏边，位置保持（已吸附）。</summary>
+            internal void EndDrag()
+            {
+                if (!dragging)
+                    return;
+                dragging = false;
+                ReleaseMouseCapture();
+                CommitDrop();
+                Log.Write("arranger drag end edge=" + edge
+                    + " offset=" + offsetX.ToString("0") + "," + offsetY.ToString("0"));
+            }
+
+            /// <summary>把方块拖到光标处（鼠标移动与自动化测试共用同一套逻辑）。</summary>
+            internal void DragTo(Point cursor)
+            {
+                Point center = WindowsCenter;
+                double rawLeft = cursor.X - grab.X;
+                double rawTop = cursor.Y - grab.Y;
+                double wantX = rawLeft - (center.X - BoxW / 2);
+                double wantY = rawTop - (center.Y - BoxH / 2);
+
+                double snapX, snapY;
+                NearestOffset(wantX, wantY, out snapX, out snapY);
+                double dx = wantX - snapX;
+                double dy = wantY - snapY;
+                if (Math.Sqrt(dx * dx + dy * dy) < Magnet)
+                {
+                    wantX = snapX;
+                    wantY = snapY;
+                    grab = new Point(cursor.X - (center.X - BoxW / 2 + wantX),
+                        cursor.Y - (center.Y - BoxH / 2 + wantY));
+                }
+
+                offsetX = wantX;
+                offsetY = wantY;
+                Arrange();
+
+                if (!dragLogged)
+                {
+                    dragLogged = true;
+                    Log.Write("arranger drag move to offset=" + offsetX.ToString("0") + ","
+                        + offsetY.ToString("0"));
+                }
+            }
+
+            /// <summary>松手：按偏移的主方向决定从哪条边切屏，斜角也算（左上/右下等）。</summary>
+            private void CommitDrop()
+            {
+                double stepX = BoxW + Gap;
+                double stepY = BoxH + Gap;
+
+                // 斜放在四角时，主方向取偏移更大的那个轴，保证切屏行为确定
+                if (Math.Abs(offsetX) / stepX >= Math.Abs(offsetY) / stepY)
+                    edge = offsetX < 0 ? "left" : "right";
+                else
+                    edge = offsetY < 0 ? "top" : "bottom";
+
+                Arrange();
+                Notify();
+            }
+
+            /// <summary>最近的整齐位置（左中右 × 上中下，共 8 个，去掉重叠的中心）。</summary>
+            private void NearestOffset(double x, double y, out double snapX, out double snapY)
+            {
+                double stepX = BoxW + Gap;
+                double stepY = BoxH + Gap;
+                string[] grid = new string[] { "-1", "0", "1" };
+                double best = double.MaxValue;
                 double bx = x;
                 double by = y;
-                string[] sides = new string[] { "left", "right", "top", "bottom" };
-                foreach (string side in sides)
+                foreach (string sx in grid)
                 {
-                    double cx, cy;
-                    Canonical(side, out cx, out cy);
-                    double dx = x - cx;
-                    double dy = y - cy;
-                    double distance = Math.Sqrt(dx * dx + dy * dy);
-                    if (distance < bestDistance)
+                    foreach (string sy in grid)
                     {
-                        bestDistance = distance;
-                        best = side;
-                        bx = cx;
-                        by = cy;
+                        int ix = int.Parse(sx);
+                        int iy = int.Parse(sy);
+                        if (ix == 0 && iy == 0)
+                            continue;   // 完全重叠的位置没有意义
+                        double cx = ix * stepX;
+                        double cy = iy * stepY;
+                        double dx = x - cx;
+                        double dy = y - cy;
+                        double distance = Math.Sqrt(dx * dx + dy * dy);
+                        if (distance < best)
+                        {
+                            best = distance;
+                            bx = cx;
+                            by = cy;
+                        }
                     }
                 }
                 snapX = bx;
                 snapY = by;
-                return best;
-            }
-
-            private string NearestSide(double x, double y)
-            {
-                double snapX, snapY;
-                return NearestSide(x, y, out snapX, out snapY);
             }
 
             private void Arrange()
             {
                 double width = ViewWidth;
-                double pairX = Math.Max(Padding, (width - (BoxW * 2 + Gap)) / 2);
-                double pairY = (CanvasH - (BoxH * 2 + Gap)) / 2;
-                double centerX = Math.Max(Padding, (width - BoxW) / 2);
-                double centerY = (CanvasH - BoxH) / 2;
+                Point center = WindowsCenter;
 
-                double winX = centerX, winY = centerY, ubuX = centerX, ubuY = centerY;
-                switch (edge)
-                {
-                    case "left":
-                        ubuX = pairX; winX = pairX + BoxW + Gap; break;
-                    case "right":
-                        winX = pairX; ubuX = pairX + BoxW + Gap; break;
-                    case "top":
-                        ubuY = pairY; winY = pairY + BoxH + Gap; break;
-                    default:
-                        winY = pairY; ubuY = pairY + BoxH + Gap; break;
-                }
+                // Windows 固定在画布中心，Ubuntu 按偏移摆放（斜角也能放）
+                double winLeft = center.X - BoxW / 2;
+                double winTop = center.Y - BoxH / 2;
+                double ubuLeft = winLeft + offsetX;
+                double ubuTop = winTop + offsetY;
 
-                SetLeft(windows, winX); SetTop(windows, winY);
-                SetLeft(ubuntu, ubuX); SetTop(ubuntu, ubuY);
+                // 夹在画布内，窗口变窄时也不会跑到看不见的地方
+                double minLeft = Math.Min(winLeft, ubuLeft);
+                double maxRight = Math.Max(winLeft, ubuLeft) + BoxW;
+                double minTop = Math.Min(winTop, ubuTop);
+                double maxBottom = Math.Max(winTop, ubuTop) + BoxH;
+                double shiftX = minLeft < Padding ? Padding - minLeft
+                    : (maxRight > width - Padding ? width - Padding - maxRight : 0);
+                double shiftY = minTop < Padding ? Padding - minTop
+                    : (maxBottom > CanvasH - Padding ? CanvasH - Padding - maxBottom : 0);
+
+                SetLeft(windows, winLeft + shiftX);
+                SetTop(windows, winTop + shiftY);
+                SetLeft(ubuntu, ubuLeft + shiftX);
+                SetTop(ubuntu, ubuTop + shiftY);
             }
 
             private static Border MakeBox(bool isWindows)

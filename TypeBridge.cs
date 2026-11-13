@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.5.21.0")]
+[assembly: AssemblyVersion("3.6.0.0")]
 
 namespace TypeBridgeApp
 {
@@ -2784,6 +2784,8 @@ namespace TypeBridgeApp
         private bool linkMouse = true;
         private bool edgeSwitch = true;
         private string switchEdge = "right";
+        // 摆放位置（方块相对本机的偏移，"dx,dy"），四个斜角和自由位置都靠它记住
+        private string layoutOffset = string.Empty;
         // 切换成功时右下角浮层：组合键方案需要提示"按什么切回"，边缘/整键切换后反而碍事，默认关。
         // 想恢复在 typebridge.ini 里设 switch_toast=1。
         private bool switchToast;
@@ -3042,6 +3044,8 @@ namespace TypeBridgeApp
                         if (lower == "left" || lower == "right" || lower == "top" || lower == "bottom")
                             switchEdge = lower;
                     }
+                    if (key == "layout_offset")
+                        layoutOffset = value.Trim();
                     if (key == "switch_toast")
                         switchToast = ParseBool(value, switchToast);
                     if (key == "file_port")
@@ -3107,7 +3111,8 @@ namespace TypeBridgeApp
             try
             {
                 WpfSettingsWindow form = new WpfSettingsWindow(
-                    ip, port, keyboardHotkey, mouseHotkey, linkMouse, switchEdge, recvDir, remoteDir, firstRun);
+                    ip, port, keyboardHotkey, mouseHotkey, linkMouse, switchEdge, recvDir, remoteDir,
+                    firstRun, layoutOffset);
                 {
                     if (form.ShowDialog() != true)
                         return;
@@ -3119,6 +3124,7 @@ namespace TypeBridgeApp
                     mouseHotkey = form.MouseHotkey;
                     linkMouse = form.LinkMouse;
                     switchEdge = form.SwitchEdge;
+                    layoutOffset = form.LayoutOffset;
                     recvDir = form.RecvDir ?? string.Empty;
                     remoteDir = form.RemoteDir ?? string.Empty;
                     mouseHook.SwitchEdge = switchEdge;
@@ -3160,6 +3166,7 @@ namespace TypeBridgeApp
                         "mouse_with_keyboard=" + (linkMouse ? "1" : "0"),
                         "edge_switch=" + (edgeSwitch ? "1" : "0"),
                         "switch_edge=" + switchEdge,
+                        "layout_offset=" + layoutOffset,
                         "switch_toast=" + (switchToast ? "1" : "0"),
                         "file_port=" + filePort.ToString(),
                         "file_recv_port=" + fileRecvPort.ToString(),
