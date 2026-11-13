@@ -22,7 +22,7 @@ TypeBridge 是一个常驻托盘的 Windows 输入桥：只转发输入，不传
 **输入**
 
 - 全局快捷键切换（默认 `Ctrl + Alt + U`），键盘与鼠标可联动也可分开。
-- 全键盘转发：字母数字标点、方向键、功能键 F1–F24、小键盘、媒体键、修饰键、组合键（`Ctrl+A` 等）。
+- 全键盘转发：字母数字标点、方向键、功能键 F1–F12、小键盘、媒体键、修饰键、组合键（`Ctrl+A` 等）。
 - Ubuntu 模式下被转发的按键不会漏进 Windows；断开连接自动放行，不会把人锁死。
 
 **鼠标与切屏**
@@ -250,7 +250,7 @@ Windows 端配置在 EXE 同目录的 `typebridge.ini`（不会提交到仓库�
 | `remote_dir` | 空 | 让 Ubuntu 用哪个目录接收，空表示 Ubuntu 桌面 |
 | `mouse_hz` | `250` | 鼠标位移合并频率（50–1000）。手写项：设置窗口保存时会按已知字段重写文件，改完这一项不要再在设置里点保存 |
 
-**快捷键规则**：在设置里点输入框、直接按下组合键即可录制。必须含 Ctrl/Alt/Shift 之一；想用「几乎不会冲突的整键」，可以单独用 `ScrollLock`、`Pause`、`Menu`（在设置里直接按对应键），或在 ini 里手写 `keyboard_hotkey=Win+Pause`。F13–F24 只能手写。`Ctrl+Alt+Delete` 由系统保留，无法使用。
+**快捷键规则**：在设置里点输入框、直接按下组合键即可录制。必须含 Ctrl/Alt/Shift 之一；想用「几乎不会冲突的整键」，可以单独用 `ScrollLock`、`Pause`、`Menu`（在设置里直接按对应键），或在 ini 里手写 `keyboard_hotkey=Win+Pause`。`Ctrl+Alt+Delete` 由系统保留，无法使用。
 
 Ubuntu 端配置见前面的 `config.json`；端口、目录这类日常项在图形设置页里改更省事。`.deb` 安装后端口默认 4321/4322。
 
@@ -262,7 +262,7 @@ Ubuntu 端配置见前面的 `config.json`；端口、目录这类日常项在�
 | 空格 | 发送空格（选字上屏） |
 | 退格 / 回车 / Tab / Esc / Insert | `K BackSpace` / `Return` / `Tab` / `Escape` / `Insert` |
 | 方向键、PageUp/PageDown | `K Up`… / `K Prior`、`Next` |
-| F1–F24 | `K F1`…`F24` |
+| F1–F12 | `K F1`…`F12` |
 | 独立 Ctrl / Shift / Alt / Win | 松开时补发单键 |
 | CapsLock | 客户端自己维护大小写，字母以大写字形发送 |
 | NumLock / ScrollLock | 注入锁定键并保持状态 |
@@ -361,7 +361,7 @@ $wpf = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF"
 ### Ubuntu DEB
 
 ```bash
-VERSION=3.5.18 bash ubuntu/build-deb.sh
+VERSION=3.5.19 bash ubuntu/build-deb.sh
 # 产物：dist/typebridge_3.5.18_all.deb
 ```
 

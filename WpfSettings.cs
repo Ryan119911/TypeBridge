@@ -549,11 +549,11 @@ namespace TypeBridgeApp
 
             Hotkey newKeyboard = kbCapture.Value;
             if (newKeyboard == null || !newKeyboard.IsValidHotkey)
-            { Fail("键盘快捷键需要至少一个修饰键（Ctrl / Alt / Shift），或使用 ScrollLock / Pause / Menu / F13–F24 这类无冲突整键"); return; }
+            { Fail("键盘快捷键需要至少一个修饰键（Ctrl / Alt / Shift），或使用 ScrollLock / Pause / Menu 这类无冲突整键"); return; }
 
             Hotkey newMouse = mouseCapture.Value ?? Hotkey.DefaultMouse();
             if (!newMouse.IsValidHotkey)
-            { Fail("鼠标快捷键需要至少一个修饰键（Ctrl / Alt / Shift），或使用 ScrollLock / Pause / Menu / F13–F24 这类无冲突整键"); return; }
+            { Fail("鼠标快捷键需要至少一个修饰键（Ctrl / Alt / Shift），或使用 ScrollLock / Pause / Menu 这类无冲突整键"); return; }
 
             Host = newHost;
             Port = newPort;
