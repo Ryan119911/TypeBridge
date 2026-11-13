@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.5.15.0")]
+[assembly: AssemblyVersion("3.5.16.0")]
 
 namespace TypeBridgeApp
 {
@@ -4280,6 +4280,14 @@ namespace TypeBridgeApp
             {
                 return -1;
             }
+            finally
+            {
+                // 测完必须把接收超时清掉：这条连接会被直接拿去当正式会话，
+                // 留着 700ms 超时的话，空闲超过 700ms 读取就抛异常，读线程直接退出，
+                // 于是 PONG 再也收不到 —— 表现就是"鼠标在 Ubuntu 上但 3 秒后被强行收回"。
+                try { client.ReceiveTimeout = 0; }
+                catch { }
+            }
         }
 
         private void ConnectToServer()
@@ -4502,6 +4510,8 @@ namespace TypeBridgeApp
 
                 if ((keyboardMode || mouseMode) && (DateTime.UtcNow - lastPongUtc).TotalSeconds > 3)
                 {
+                    Log.Write("watchdog: no pong for " + (DateTime.UtcNow - lastPongUtc).TotalSeconds.ToString("0.0")
+                        + "s, back to Windows");
                     ShowTrayTip("已切回本机", "3 秒没收到 Ubuntu 回应，先把键盘鼠标还给你");
                     SetKeyboardMode(false, false);
                     SetMouseMode(false, false);
