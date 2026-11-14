@@ -3111,8 +3111,8 @@ namespace TypeBridgeApp
             try
             {
                 WpfSettingsWindow form = new WpfSettingsWindow(
-                    ip, port, keyboardHotkey, mouseHotkey, linkMouse, switchEdge, recvDir, remoteDir,
-                    firstRun, layoutOffset);
+                    ip, port, keyboardHotkey, mouseHotkey, linkMouse, edgeSwitch, switchEdge,
+                    recvDir, remoteDir, firstRun, layoutOffset);
                 {
                     if (form.ShowDialog() != true)
                         return;
@@ -3123,6 +3123,7 @@ namespace TypeBridgeApp
                     keyboardHotkey = form.KeyboardHotkey;
                     mouseHotkey = form.MouseHotkey;
                     linkMouse = form.LinkMouse;
+                    edgeSwitch = form.EdgeSwitch;
                     switchEdge = form.SwitchEdge;
                     layoutOffset = form.LayoutOffset;
                     recvDir = form.RecvDir ?? string.Empty;

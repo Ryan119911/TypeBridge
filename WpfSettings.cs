@@ -32,12 +32,14 @@ namespace TypeBridgeApp
         private HotkeyCapture mouseCapture;
         private HotkeyCapture activeCapture;
         private readonly Switch linkSwitch = new Switch();
+        private readonly Switch edgeSwitchToggle = new Switch();
         private readonly ScreenArranger arranger = new ScreenArranger();
         private readonly TextBlock errorText = new TextBlock();
         private readonly string initialEdge;
         private readonly string initialOffset;
 
         private bool linkMouse;
+        private bool edgeSwitch;
 
         [System.Runtime.InteropServices.DllImport("dwmapi.dll", PreserveSig = true)]
         private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
@@ -54,6 +56,9 @@ namespace TypeBridgeApp
         internal string LayoutOffset { get { return arranger.OffsetText; } }
         internal bool LinkMouse { get { return linkMouse; } }
 
+        /// <summary>边缘切屏总开关，对应 ini 里的 edge_switch。</summary>
+        internal bool EdgeSwitch { get { return edgeSwitch; } }
+
         /// <summary>只接受守护进程认识的四个方向，缺省与 BridgeApplicationContext 一致（Ubuntu 在右）。</summary>
         private static string NormalizeEdge(string value)
         {
@@ -63,7 +68,8 @@ namespace TypeBridgeApp
         }
 
         internal WpfSettingsWindow(string host, int port, Hotkey keyboardHotkey, Hotkey mouseHotkey,
-            bool linkMouseValue, string switchEdgeValue, string recvDirValue, string remoteDirValue,
+            bool linkMouseValue, bool edgeSwitchValue, string switchEdgeValue,
+            string recvDirValue, string remoteDirValue,
             bool firstRun, string layoutOffsetValue)
         {
             Host = host;
@@ -73,6 +79,7 @@ namespace TypeBridgeApp
             RecvDir = recvDirValue ?? string.Empty;
             RemoteDir = remoteDirValue ?? string.Empty;
             linkMouse = linkMouseValue;
+            edgeSwitch = edgeSwitchValue;
             initialEdge = NormalizeEdge(switchEdgeValue);
             initialOffset = layoutOffsetValue ?? string.Empty;
 
@@ -263,6 +270,17 @@ namespace TypeBridgeApp
             TextBlock hint = Note("按住 Ubuntu 方块拖到任意位置：上下左右或四个角都行，靠近整齐位置会自动吸附");
             hint.Margin = new Thickness(0, 8, 0, 0);
             layoutBody.Children.Add(hint);
+
+            // 边缘切屏总开关：以前只能改 ini 里的 edge_switch，设置页没入口
+            edgeSwitchToggle.IsOn = edgeSwitch;
+            edgeSwitchToggle.Toggled += delegate
+            {
+                edgeSwitch = edgeSwitchToggle.IsOn;
+                arranger.Opacity = edgeSwitch ? 1.0 : 0.45;
+            };
+            arranger.Opacity = edgeSwitch ? 1.0 : 0.45;
+            layoutBody.Children.Add(ToggleRow(edgeSwitchToggle,
+                "启用边缘切屏", "鼠标被推过这一侧就切到 Ubuntu；关掉后只能用快捷键切"));
             stack.Children.Add(layoutCard);
 
             StackPanel fileBody = new StackPanel();
@@ -418,6 +436,34 @@ namespace TypeBridgeApp
             card.Children.Add(Label("端口"));
             card.Children.Add(portRow);
             return cardHost;
+        }
+
+        /// <summary>开关 + 标题 + 说明的一行，用于边缘切屏这类总开关。</summary>
+        private static UIElement ToggleRow(Switch toggle, string title, string detail)
+        {
+            Grid row = new Grid { Margin = new Thickness(0, 14, 0, 0) };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            row.ColumnDefinitions.Add(new ColumnDefinition());
+            row.Children.Add(toggle);
+
+            StackPanel text = new StackPanel
+            {
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(10, 0, 0, 0)
+            };
+            text.Children.Add(new TextBlock
+            {
+                Text = title,
+                FontSize = 14,
+                Foreground = new SolidColorBrush(Ink)
+            });
+            TextBlock sub = Note(detail);
+            sub.Margin = new Thickness(0, 2, 0, 0);
+            text.Children.Add(sub);
+
+            Grid.SetColumn(text, 1);
+            row.Children.Add(text);
+            return row;
         }
 
         private UIElement BuildLinkRow()
