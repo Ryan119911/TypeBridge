@@ -4,11 +4,12 @@ PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
-ExecStart=/usr/bin/python3 /usr/lib/typebridge/typebridge-ubuntu.py
+# X 授权文件的位置随登录管理器而变（gdm / LightDM / SDDM 各不相同），
+# 写死某一条会让别的桌面上"服务在跑但注入不进去"，交给包装脚本探测。
+ExecStart=/usr/lib/typebridge/typebridge-daemon
 Restart=on-failure
 RestartSec=2
 Environment=DISPLAY=:0
-Environment=XAUTHORITY=%t/gdm/Xauthority
 Environment=GTK_IM_MODULE=fcitx
 Environment=QT_IM_MODULE=fcitx
 Environment=XMODIFIERS=@im=fcitx

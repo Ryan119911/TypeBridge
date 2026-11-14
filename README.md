@@ -81,6 +81,8 @@ TypeBridge 让 Windows 上的输入直接进入 Ubuntu 当前窗口：键盘、�
 
 这个页面还能启停/重启服务、改端口、复制地址、通过系统授权窗口放行防火墙。
 
+> 装完如果在应用列表里没看到图标，注销重新登录一次就出现了（服务已设为开机自启，安装脚本也会尽力帮当前用户启动一次）。图标是系统级安装的，机器上所有用户都能看到。
+
 **要求**：Ubuntu 22.04 及以上、**X11 会话**（Wayland 下不可用），已启用输入法（fcitx 或 ibus）。
 
 <details>
@@ -113,7 +115,11 @@ Environment=XMODIFIERS=@im=fcitx
 WantedBy=graphical-session.target
 ```
 
-用 ibus 就把三处 `fcitx` 换掉；`XAUTHORITY` 路径按实际会话调整。
+用 ibus 就把三处 `fcitx` 换掉。`XAUTHORITY` **不能照抄**，它随登录管理器而变：gdm/GNOME 是 `%t/gdm/Xauthority`，LightDM / SDDM 一般是 `%h/.Xauthority`，Wayland 会话里还有 `%t/.mutter-Xwaylandauth.*`。填错的表现是服务在跑但键盘注入不了。`.deb` 安装的那份用包装脚本自动挑，手动安装时自己确认一下：
+
+```bash
+ls -l /run/user/$(id -u)/gdm/Xauthority ~/.Xauthority 2>/dev/null
+```
 
 ```bash
 systemctl --user daemon-reload

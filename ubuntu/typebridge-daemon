@@ -1,0 +1,41 @@
+#!/bin/sh
+# TypeBridge 守护进程启动包装。
+#
+# 为什么需要它：不同登录管理器把 X 授权文件放在不同位置——
+# gdm/GNOME 在 $XDG_RUNTIME_DIR/gdm/Xauthority，LightDM/SDDM 通常用
+# ~/.Xauthority，还有些会话用 xauth_* 临时文件。单元文件里写死其中一条，
+# 换到别的桌面就会"服务在跑但注入不进去"。这里在启动前挑出真实可读的那份。
+#
+# 另外 XAUTHORITY 指向不存在的文件时 Xlib 会直接连不上（不是回退到默认值），
+# 所以只在确认可读时才导出。
+
+set -e
+
+runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+home="${HOME:-/root}"
+
+if [ -z "${DISPLAY:-}" ]; then
+    DISPLAY=":0"
+    export DISPLAY
+fi
+
+if [ -n "${XAUTHORITY:-}" ] && [ -r "${XAUTHORITY}" ]; then
+    : # 调用方显式给了可用的，尊重它
+else
+    unset XAUTHORITY
+    for candidate in \
+        "${runtime}/gdm/Xauthority" \
+        "${runtime}"/gdm/Xauthority.* \
+        "${runtime}"/.mutter-Xwaylandauth.* \
+        "${runtime}"/xauth_* \
+        "${home}/.Xauthority"
+    do
+        if [ -r "$candidate" ]; then
+            XAUTHORITY="$candidate"
+            export XAUTHORITY
+            break
+        fi
+    done
+fi
+
+exec /usr/bin/python3 /usr/lib/typebridge/typebridge-ubuntu.py "$@"

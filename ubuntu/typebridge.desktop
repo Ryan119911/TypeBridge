@@ -7,5 +7,5 @@ Comment[zh_CN]=配置 Windows 到 Ubuntu 的键盘输入桥
 Exec=/usr/bin/typebridge-ui
 Icon=typebridge
 Terminal=false
-Categories=Utility;Settings;
+Categories=Utility;
 StartupNotify=true
