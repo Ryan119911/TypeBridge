@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${VERSION:-3.6.1}"
+VERSION="${VERSION:-3.6.2}"
 BUILD="$(mktemp -d)"
 trap 'rm -rf "$BUILD"' EXIT
 
@@ -66,9 +66,11 @@ if [ -n "${SUDO_USER:-}" ] && command -v runuser >/dev/null 2>&1; then
     if [ -n "$target_uid" ] && [ -d "/run/user/$target_uid" ]; then
         timeout 8 runuser -u "$SUDO_USER" -- env \
             XDG_RUNTIME_DIR="/run/user/$target_uid" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$target_uid/bus" \
             systemctl --user daemon-reload >/dev/null 2>&1 || true
         timeout 8 runuser -u "$SUDO_USER" -- env \
             XDG_RUNTIME_DIR="/run/user/$target_uid" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$target_uid/bus" \
             systemctl --user start typebridge >/dev/null 2>&1 || true
     fi
 fi
@@ -83,6 +85,17 @@ cat > "$PKG/DEBIAN/prerm" <<'EOF'
 set -e
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --global disable typebridge.service >/dev/null 2>&1 || true
+    # disable 只删开机自启链接，运行中的用户服务不会停；升级/卸载必须把旧进程收掉，
+    # 否则 postinst 的 start 对已 active 的单元是空操作，旧版本一直跑着。
+    for runtime in /run/user/[0-9]*; do
+        [ -d "$runtime" ] || continue
+        uid="${runtime##*/}"
+        user="$(id -un "$uid" 2>/dev/null)" || continue
+        runuser -u "$user" -- env \
+            XDG_RUNTIME_DIR="$runtime" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" \
+            systemctl --user stop typebridge.service >/dev/null 2>&1 || true
+    done
 fi
 exit 0
 EOF

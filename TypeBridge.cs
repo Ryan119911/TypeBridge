@@ -14,10 +14,40 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.6.1.0")]
+[assembly: AssemblyVersion("3.6.2.0")]
 
 namespace TypeBridgeApp
 {
+    /// <summary>屏幕摆放的公共几何：设置页派生方向与实际切屏必须用同一套公式。</summary>
+    internal static class LayoutMath
+    {
+        internal const double BoxW = 132;
+        internal const double BoxH = 82;
+        internal const double Gap = 18;
+
+        internal static string EdgeFromOffset(double offsetX, double offsetY)
+        {
+            double stepX = BoxW + Gap;
+            double stepY = BoxH + Gap;
+            if (Math.Abs(offsetX) / stepX >= Math.Abs(offsetY) / stepY)
+                return offsetX < 0 ? "left" : "right";
+            return offsetY < 0 ? "top" : "bottom";
+        }
+
+        internal static bool TryParseOffset(string text, out double dx, out double dy)
+        {
+            dx = 0;
+            dy = 0;
+            string[] xy = (text ?? string.Empty).Split(',');
+            if (xy.Length != 2)
+                return false;
+            return double.TryParse(xy[0].Trim(), System.Globalization.NumberStyles.Float,
+                       System.Globalization.CultureInfo.InvariantCulture, out dx)
+                && double.TryParse(xy[1].Trim(), System.Globalization.NumberStyles.Float,
+                       System.Globalization.CultureInfo.InvariantCulture, out dy);
+        }
+    }
+
     internal static class Program
     {
         [DllImport("user32.dll")]
@@ -93,6 +123,22 @@ namespace TypeBridgeApp
             }
         }
 
+        /// <summary>把 ini 里的多地址拆成候选列表（逗号 / 分号 / 全角 / 空白）。</summary>
+        internal static string[] ParseHostList(string value)
+        {
+            List<string> list = new List<string>();
+            foreach (string part in (value ?? string.Empty).Split(
+                new char[] { ',', ';', '\uFF0C', '\uFF1B', ' ' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string host = part.Trim();
+                if (host.Length > 0 && !list.Contains(host))
+                    list.Add(host);
+            }
+            if (list.Count == 0)
+                list.Add("127.0.0.1");
+            return list.ToArray();
+        }
+
         /// <summary>
         /// 命令行发文件：TypeBridge.exe --send &lt;文件&gt; [更多文件…]
         /// 给脚本留的口子，也方便不点托盘直接传（不影响正在运行的托盘实例）。
@@ -102,7 +148,7 @@ namespace TypeBridgeApp
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
-            string ip = "127.0.0.1";
+            string[] cliHosts = new string[] { "127.0.0.1" };
             int port = 4322;
             try
             {
@@ -117,9 +163,14 @@ namespace TypeBridgeApp
                         string key = raw.Substring(0, eq).Trim().ToLowerInvariant();
                         string value = raw.Substring(eq + 1).Trim();
                         if (key == "ip" && value.Length > 0)
-                            ip = value;
+                            cliHosts = Program.ParseHostList(value);
                         else if (key == "file_port")
-                            int.TryParse(value, out port);
+                        {
+                            // TryParse 失败会把 out 置 0，必须先落在临时变量上校验
+                            int parsedPort;
+                            if (int.TryParse(value, out parsedPort) && parsedPort > 0 && parsedPort <= 65535)
+                                port = parsedPort;
+                        }
                     }
                 }
             }
@@ -143,15 +194,25 @@ namespace TypeBridgeApp
                             break;
                         string error;
                         string destination;
-                        if (FileSender.Upload(ip, port, file, progress, out error, out destination))
+                        bool uploaded = false;
+                        string lastError = null;
+                        // 配置里可以写多个地址，CLI 也要像 GUI 一样逐个尝试，
+                        // 不能把含逗号的整串 ip 直接交给 ConnectAsync。
+                        foreach (string host in cliHosts)
                         {
-                            ok++;
-                            if (destination != null)
-                                lastDestination = destination;
+                            if (FileSender.Upload(host, port, file, progress, out error, out destination))
+                            {
+                                uploaded = true;
+                                ok++;
+                                if (destination != null)
+                                    lastDestination = destination;
+                                break;
+                            }
+                            lastError = error;
                         }
-                        else if (firstProblem == null)
+                        if (!uploaded && firstProblem == null)
                         {
-                            firstProblem = System.IO.Path.GetFileName(file) + "：" + (error ?? "发送失败");
+                            firstProblem = System.IO.Path.GetFileName(file) + "：" + (lastError ?? "发送失败");
                         }
                     }
 
@@ -863,7 +924,11 @@ namespace TypeBridgeApp
         /// </summary>
         private void ReconcileModifiers()
         {
-            if (modifierDown.Count == 0)
+            // 接管期间修饰键的 keydown/keyup 全被钩子吞掉，GetAsyncKeyState
+            // 读不到它们（3.4.1 实测恒为 0）。拿它判"已松开"会把长按超过
+            // GhostModifierAfter 的 Ctrl/Shift 误清，组合键降级成单键。
+            // 接管时集合完全由钩子事件维护；退出接管时 Enabled setter 已清空。
+            if (Enabled || modifierDown.Count == 0)
                 return;
 
             DateTime now = DateTime.UtcNow;
@@ -1434,8 +1499,9 @@ namespace TypeBridgeApp
                 flushTimer.Start();
                 return;
             }
-            // 停表前把残留位移发出去，避免最后一小段移动被吞掉
-            Flush();
+            // 停表前把残留位移发出去：此刻 Enabled/Connected 刚被关掉，
+            // Active 已是 false，普通 Flush 会先清零再直接 return，最后一小段位移被吞掉。
+            Flush(true);
             flushTimer.Stop();
             pendingDx = 0;
             pendingDy = 0;
@@ -1786,6 +1852,16 @@ namespace TypeBridgeApp
 
         private bool AtSwitchEdge(int x, int y)
         {
+            // 刚从 Ubuntu 推回来的一小段时间内不许再切走，否则光标停在边缘
+            // 会来回抖。Watching setter 会把 edgeArmed 重置为 true，所以冷却
+            // 必须在这里统一把关，不能只依赖 edgeArmed。
+            if (edgeCooldownUntil != 0
+                && unchecked(Environment.TickCount - edgeCooldownUntil) < 0)
+            {
+                edgeHits = 0;
+                return false;
+            }
+
             if (!edgeArmed)
             {
                 const int margin = 4;
@@ -1828,7 +1904,7 @@ namespace TypeBridgeApp
             return true;
         }
 
-        private void Flush()
+        private void Flush(bool force = false)
         {
             int dx = pendingDx;
             int dy = pendingDy;
@@ -1836,7 +1912,7 @@ namespace TypeBridgeApp
                 return;
             pendingDx = 0;
             pendingDy = 0;
-            if (!Active)
+            if (!force && !Active)
                 return;
             EventHandler<BridgeMouseMoveEventArgs> handler = Moved;
             if (handler == null)
@@ -2069,6 +2145,8 @@ namespace TypeBridgeApp
         private long lastReportTick;
         private double lastRate;
         private bool finished;
+        // Finish 的延迟隐藏定时器要能被下一次传输取消
+        private Timer hideTimer;
 
         internal TransferProgressForm()
         {
@@ -2186,6 +2264,15 @@ namespace TypeBridgeApp
             lastRate = 0;
             lastReportTick = 0;
             startedUtc = DateTime.UtcNow;
+            // 上一次 Finish 隐藏了取消按钮并挂了 1.6s 自动隐藏；复用窗体时
+            // 两者都要复位，否则取消永远点不到，新传输还会被旧定时器一起隐藏。
+            if (hideTimer != null)
+            {
+                hideTimer.Stop();
+                hideTimer.Dispose();
+                hideTimer = null;
+            }
+            cancelButton.Visible = true;
             cancelButton.Enabled = true;
             percentLabel.Text = "准备中…";
             detailLabel.Text = string.Empty;
@@ -2273,15 +2360,23 @@ namespace TypeBridgeApp
 
             if (!keepVisible)
             {
-                Timer hide = new Timer();
-                hide.Interval = 1600;
-                hide.Tick += delegate
+                if (hideTimer != null)
                 {
-                    hide.Stop();
-                    hide.Dispose();
+                    hideTimer.Stop();
+                    hideTimer.Dispose();
+                }
+                Timer timer = new Timer();
+                hideTimer = timer;
+                timer.Interval = 1600;
+                timer.Tick += delegate
+                {
+                    timer.Stop();
+                    timer.Dispose();
+                    if (hideTimer == timer)
+                        hideTimer = null;
                     Hide();
                 };
-                hide.Start();
+                timer.Start();
             }
         }
     }
@@ -2334,8 +2429,7 @@ namespace TypeBridgeApp
                                 "RESUME " + info.Length + " " + info.Name + "\n");
                             prober.Write(question, 0, question.Length);
                             prober.Flush();
-                            probe.ReceiveTimeout = 2500;
-                            string answer = ReadReply(probe);
+                            string answer = ReadReply(probe, 2500);
                             if (answer != null && answer.StartsWith("HAVE "))
                             {
                                 resumeSupported = true;
@@ -2422,11 +2516,11 @@ namespace TypeBridgeApp
             }
         }
 
-        internal static string ReadReply(TcpClient socket)
+        internal static string ReadReply(TcpClient socket, int timeoutMs = 15000)
         {
             try
             {
-                socket.ReceiveTimeout = 15000;
+                socket.ReceiveTimeout = timeoutMs;
                 NetworkStream source = socket.GetStream();
                 List<byte> bytes = new List<byte>();
                 byte[] chunk = new byte[256];
@@ -2794,19 +2888,33 @@ namespace TypeBridgeApp
         private bool keyboardMode;
         private bool mouseMode;
         private DateTime lastPongUtc = DateTime.UtcNow;
+
+        [DllImport("user32.dll")]
+        private static extern uint GetClipboardSequenceNumber();
+        private uint lastClipboardSeq;
         private bool configLoaded;
         private bool settingsOpen;
         private bool disposed;
+        // 同名文件并发上传要串行，避免两条连接共写一个 .part
+        private readonly Dictionary<string, object> uploadGates = new Dictionary<string, object>();
 
         // 网络收发全部在后台线程执行。全局钩子也挂在 UI 线程上，如果在钩子回调里
         // 同步写网络，Tailscale 链路一旦抖动（中继切换/半死连接），Write 会阻塞
         // 几秒到几十秒：钩子回调超时，系统把按键鼠标放行给 Windows —— 表现就是
         // "两台电脑同时响应"、修饰键状态失步、切换热键失灵。改队列后 UI 线程只入队。
-        private readonly Queue<string> pendingLines = new Queue<string>();
+        // 每次连接用独立的队列和世代号：重连时旧发送线程即使还活着，
+        // 也只碰自己的旧队列 / 旧流，不会抢走新消息或误关新连接。
+        private volatile Queue<string> pendingLines = new Queue<string>();
         private readonly object sendGate = new object();
         private System.Threading.Thread senderThread;
         private volatile bool senderRunning;
+        private volatile int senderGeneration;
         private volatile bool connecting;
+        // 控制连接实测最快的地址，文件通道复用它
+        private string activeHost;
+        // 设置窗口保存是先断开再异步重连，恢复键鼠的意图挂到连接成功回调里执行
+        private bool resumeKeyboardAfterReconnect;
+        private bool resumeMouseAfterReconnect;
         private DateTime lastEnqueueUtc;
         private DateTime lastToggleUtc;
         private DateTime lastMouseToggleUtc;
@@ -3070,9 +3178,15 @@ namespace TypeBridgeApp
             {
                 // 配置不可读时继续使用默认值。
             }
+
+            // 摆放位置是方向的唯一事实来源（设置页保存时两者一起写）。
+            // 手改 ini 造成分叉时按 layout_offset 重新派生，避免边缘切屏方向错乱。
+            double layoutX, layoutY;
+            if (LayoutMath.TryParseOffset(layoutOffset, out layoutX, out layoutY))
+                switchEdge = LayoutMath.EdgeFromOffset(layoutX, layoutY);
         }
 
-        private static bool ParseBool(string value, bool fallback)
+        private bool ParseBool(string value, bool fallback)
         {
             string lower = value.Trim().ToLowerInvariant();
             if (lower == "1" || lower == "true" || lower == "yes" || lower == "on")
@@ -3142,10 +3256,22 @@ namespace TypeBridgeApp
             finally
             {
                 ApplyHotkeys();
-                mouseHook.Watching = edgeSwitch && stream != null && !mouseMode;
-                SetKeyboardMode(resumeKeyboard, false);
-                if (linkMouse ? resumeKeyboard : resumeMouse)
-                    SetMouseMode(true, false);
+                if (stream != null)
+                {
+                    // 取消 / 保存失败：连接还在，立刻恢复原状态
+                    mouseHook.Watching = edgeSwitch && !mouseMode;
+                    SetKeyboardMode(resumeKeyboard, false);
+                    if (linkMouse ? resumeKeyboard : resumeMouse)
+                        SetMouseMode(true, false);
+                }
+                else
+                {
+                    // 保存成功触发了重连，此刻 stream==null，Set*Mode 会被守卫挡下，
+                    // hook.Enabled 会一直停在 false。挂到连接成功回调里恢复。
+                    resumeKeyboardAfterReconnect = resumeKeyboard;
+                    resumeMouseAfterReconnect = linkMouse ? resumeKeyboard : resumeMouse;
+                    mouseHook.Watching = false;
+                }
                 UpdateStatus();
                 settingsOpen = false;
             }
@@ -3172,7 +3298,8 @@ namespace TypeBridgeApp
                         "file_port=" + filePort.ToString(),
                         "file_recv_port=" + fileRecvPort.ToString(),
                         "recv_dir=" + recvDir,
-                        "remote_dir=" + remoteDir
+                        "remote_dir=" + remoteDir,
+                        "mouse_hz=" + mouseHz
                     },
                     new UTF8Encoding(false));
                 return true;
@@ -3480,6 +3607,28 @@ namespace TypeBridgeApp
             if (stream == null || disposed)
                 return;
 
+            // 剪贴板没变就不必每 600ms 把整张位图重新编码成 PNG（4K 截图会明显卡顿）。
+            uint seq = GetClipboardSequenceNumber();
+            if (seq == lastClipboardSeq)
+                return;
+            lastClipboardSeq = seq;
+
+            // 远端刚写进来的图文：无论回读能否解码成位图都要消费掉回声标志，
+            // 否则标志会残留到下一轮，把用户自己复制的新图当成回声吞掉。
+            if (suppressImageEcho)
+            {
+                suppressImageEcho = false;
+                try
+                {
+                    string echoedText = Clipboard.ContainsText() ? Clipboard.GetText() : string.Empty;
+                    byte[] echoed = ClipboardImageToPng();
+                    if (echoed != null)
+                        lastLocalImageKey = ImageKey(echoed, echoedText);
+                }
+                catch { }
+                return;
+            }
+
             string text = string.Empty;
             byte[] image = null;
             try
@@ -3498,14 +3647,6 @@ namespace TypeBridgeApp
             if (image != null)
             {
                 string key = ImageKey(image, text);
-                if (suppressImageEcho)
-                {
-                    // 刚由 Ubuntu 写进来的图片，回读后重新编码的 PNG 与原图不同，
-                    // 直接记下指纹并放行，否则会来回推成死循环。
-                    suppressImageEcho = false;
-                    lastLocalImageKey = key;
-                    return;
-                }
                 if (key == lastLocalImageKey)
                     return;
                 lastLocalImageKey = key;
@@ -3594,6 +3735,11 @@ namespace TypeBridgeApp
         {
             if (png == null || png.Length == 0)
                 return;
+            if (png.Length > MaxClipImageBytes)
+            {
+                Log.Write("clipboard image too large, skipped: " + png.Length + " bytes");
+                return;
+            }
             if (System.Threading.Interlocked.CompareExchange(ref imageSending, 1, 0) != 0)
                 return;   // 上一张还在传，这张直接跳过，避免堆积
 
@@ -3603,7 +3749,8 @@ namespace TypeBridgeApp
             {
                 socket = new TcpClient();
                 socket.NoDelay = true;
-                if (!socket.ConnectAsync(ip, filePort).Wait(4000))
+                string[] fileHosts = FileTargetHosts();
+                if (!socket.ConnectAsync(fileHosts[0], filePort).Wait(4000))
                 {
                     Log.Write("clipboard image: 连不上文件端口 " + filePort);
                     return;
@@ -3652,19 +3799,30 @@ namespace TypeBridgeApp
                 return;
             try
             {
-                Bitmap image;
-                using (MemoryStream buffer = new MemoryStream(png))
+                // DataObject 会持有 Bitmap 供剪贴板按需序列化，成功时不能 Dispose；
+                // 但 SetDataObject 抛异常（剪贴板被别的程序占用很常见）时要释放，
+                // 否则每失败一次就泄漏一个 GDI+ 句柄。
+                Bitmap image = null;
+                bool handedOff = false;
+                try
                 {
+                    using (MemoryStream buffer = new MemoryStream(png))
                     using (Image loaded = Image.FromStream(buffer))
                         image = new Bitmap(loaded);
-                }
 
-                // 图 + 文一起放：粘到图片程序里是图，粘到输入框里是文本
-                DataObject payload = new DataObject();
-                payload.SetData(DataFormats.Bitmap, true, image);
-                if (!string.IsNullOrEmpty(text))
-                    payload.SetData(DataFormats.UnicodeText, true, text);
-                Clipboard.SetDataObject(payload, true);
+                    // 图 + 文一起放：粘到图片程序里是图，粘到输入框里是文本
+                    DataObject payload = new DataObject();
+                    payload.SetData(DataFormats.Bitmap, true, image);
+                    if (!string.IsNullOrEmpty(text))
+                        payload.SetData(DataFormats.UnicodeText, true, text);
+                    Clipboard.SetDataObject(payload, true);
+                    handedOff = true;
+                }
+                finally
+                {
+                    if (!handedOff && image != null)
+                        image.Dispose();
+                }
 
                 suppressImageEcho = true;
                 lastLocalImageKey = null;
@@ -3705,7 +3863,9 @@ namespace TypeBridgeApp
         private void ReadLoop(NetworkStream target)
         {
             byte[] buffer = new byte[8192];
-            string pending = string.Empty;
+            // 必须在字节层面组帧：一个中文字符的 UTF-8 序列可能被拆到两次 Read，
+            // 逐块 GetString 会各自产生 U+FFFD，拼回字符串也救不回来。
+            List<byte> pending = new List<byte>();
             while (readerRunning)
             {
                 int count;
@@ -3720,12 +3880,22 @@ namespace TypeBridgeApp
                 if (count <= 0)
                     break;
 
-                pending += Encoding.UTF8.GetString(buffer, 0, count);
-                int index;
-                while ((index = pending.IndexOf('\n')) >= 0)
+                for (int i = 0; i < count; i++)
+                    pending.Add(buffer[i]);
+                if (pending.Count > (1 << 20))
                 {
-                    string line = pending.Substring(0, index).TrimEnd('\r');
-                    pending = pending.Substring(index + 1);
+                    Log.Write("server line too long, dropping buffer");
+                    pending.Clear();
+                    continue;
+                }
+
+                while (true)
+                {
+                    int index = pending.IndexOf((byte)'\n');
+                    if (index < 0)
+                        break;
+                    string line = Encoding.UTF8.GetString(pending.ToArray(), 0, index).TrimEnd('\r');
+                    pending.RemoveRange(0, index + 1);
                     if (line.Length > 0)
                         HandleServerLine(line);
                 }
@@ -3956,7 +4126,8 @@ namespace TypeBridgeApp
                 string header = ReadAsciiLine(source);
                 string[] parts = header.Split(new char[] { ' ' }, 3);
                 bool clipImage = parts.Length == 3 && parts[0] == "CLIPIMG";
-                if (parts.Length != 3 || (parts[0] != "UPLOAD" && !clipImage))
+                bool resumeQuery = parts.Length == 3 && parts[0] == "RESUME";
+                if (parts.Length != 3 || (parts[0] != "UPLOAD" && !clipImage && !resumeQuery))
                 {
                     SendAscii(source, "ERR bad header");
                     return;
@@ -3976,6 +4147,12 @@ namespace TypeBridgeApp
                     long captionLength;
                     if (!long.TryParse(parts[2], out captionLength) || captionLength < 0)
                         captionLength = 0;
+                    // 图片和文本都攒在内存里，畸形长度头足以把进程撑爆
+                    if (size > MaxClipImageBytes || captionLength > MaxClipCaptionBytes)
+                    {
+                        SendAscii(source, "ERR clipboard too large");
+                        return;
+                    }
 
                     byte[] png;
                     using (MemoryStream buffer = new MemoryStream())
@@ -4013,6 +4190,11 @@ namespace TypeBridgeApp
                                 buffer.Write(chunk, 0, count);
                                 remainingText -= count;
                             }
+                            if (remainingText != 0)
+                            {
+                                SendAscii(source, "ERR incomplete");
+                                return;
+                            }
                             caption = Encoding.UTF8.GetString(buffer.ToArray());
                         }
                     }
@@ -4040,38 +4222,109 @@ namespace TypeBridgeApp
                     return;
                 }
 
-                string name = SafeFileName(parts[2]);
-                string dest = System.IO.Path.Combine(directory, name);
-                string temp = dest + ".part";
-
-                long remaining = size;
-                using (FileStream output = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+                // 第三段是 "文件名 [续传偏移]"。文件名本身可能以「空格 + 数字」
+                // 结尾（如 "IMG 2"），所以只有确实存在匹配的断点记录才把它当偏移。
+                string raw = parts[2];
+                string name = SafeFileName(raw);
+                long offset = 0;
+                int space = raw.LastIndexOf(' ');
+                if (space > 0)
                 {
-                    byte[] buffer = new byte[65536];
-                    while (remaining > 0)
+                    string tail = raw.Substring(space + 1);
+                    long candidate;
+                    if (long.TryParse(tail, out candidate) && candidate > 0)
                     {
-                        int count = source.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining));
-                        if (count <= 0)
-                            break;
-                        output.Write(buffer, 0, count);
-                        remaining -= count;
+                        string candidateName = SafeFileName(raw.Substring(0, space));
+                        string candidateDest = System.IO.Path.Combine(directory, candidateName);
+                        if (ReadResumeOffset(candidateDest, candidateName, size) == candidate)
+                        {
+                            name = candidateName;
+                            offset = candidate;
+                        }
                     }
                 }
 
-                if (remaining != 0)
+                string dest = System.IO.Path.Combine(directory, name);
+                string temp = dest + ".part";
+
+                if (resumeQuery)
                 {
-                    try { File.Delete(temp); }
-                    catch { }
-                    SendAscii(source, "ERR incomplete");
+                    // "RESUME <总大小> <文件名>" 第三段整体是文件名，不带偏移；
+                    // 走上面按空格拆偏移的逻辑会把 "IMG 2" 误截成 "IMG"。
+                    string queryName = SafeFileName(raw);
+                    string queryDest = System.IO.Path.Combine(directory, queryName);
+                    SendAscii(source, "HAVE " + ReadResumeOffset(queryDest, queryName, size));
                     return;
                 }
 
-                // 同名只留一份：原子替换
-                if (File.Exists(dest))
-                    File.Delete(dest);
-                File.Move(temp, dest);
+                // 同名文件并发上传会共写同一个 .part，按目标路径串行化
+                object gate;
+                lock (uploadGates)
+                {
+                    if (!uploadGates.TryGetValue(dest, out gate))
+                    {
+                        gate = new object();
+                        uploadGates[dest] = gate;
+                    }
+                }
 
-                SendAscii(source, "OK " + dest);
+                lock (gate)
+                {
+                    if (offset > 0 && ReadResumeOffset(dest, name, size) != offset)
+                        offset = 0;
+
+                    long remaining = size - offset;
+                    using (FileStream output = new FileStream(temp,
+                        offset > 0 ? FileMode.Open : FileMode.Create,
+                        FileAccess.Write, FileShare.None))
+                    {
+                        if (offset > 0)
+                        {
+                            output.Seek(offset, SeekOrigin.Begin);
+                            output.SetLength(offset);
+                        }
+                        else
+                        {
+                            WriteResumeMeta(dest, name, size);
+                        }
+
+                        byte[] buffer = new byte[65536];
+                        while (remaining > 0)
+                        {
+                            int count = source.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining));
+                            if (count <= 0)
+                                break;
+                            output.Write(buffer, 0, count);
+                            remaining -= count;
+                        }
+                    }
+
+                    if (remaining != 0)
+                    {
+                        // 保留 .part 与 .part.info，下次重发同一个文件接着传
+                        SendAscii(source, "ERR incomplete");
+                        return;
+                    }
+
+                    // 原子替换：不会像 Delete+Move 那样在异常时把旧文件和新数据一起丢掉
+                    try
+                    {
+                        if (File.Exists(dest))
+                            File.Replace(temp, dest, null);
+                        else
+                            File.Move(temp, dest);
+                    }
+                    catch (PlatformNotSupportedException)
+                    {
+                        if (File.Exists(dest))
+                            File.Delete(dest);
+                        File.Move(temp, dest);
+                    }
+                    try { File.Delete(PartMetaPath(dest)); }
+                    catch { }
+
+                    SendAscii(source, "OK " + dest);
+                }
                 string saved = name;
                 try
                 {
@@ -4103,11 +4356,61 @@ namespace TypeBridgeApp
                 Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "typebridge");
         }
 
+        private const long MaxClipImageBytes = 64L * 1024 * 1024;
+        private const long MaxClipCaptionBytes = 1024L * 1024;
+
+        private static string PartMetaPath(string dest)
+        {
+            return dest + ".part.info";
+        }
+
+        private void WriteResumeMeta(string dest, string name, long size)
+        {
+            try
+            {
+                Dictionary<string, object> meta = new Dictionary<string, object>();
+                meta["name"] = name;
+                meta["size"] = size;
+                System.IO.File.WriteAllText(PartMetaPath(dest), json.Serialize(meta),
+                                           new UTF8Encoding(false));
+            }
+            catch { }
+        }
+
+        private long ReadResumeOffset(string dest, string name, long size)
+        {
+            try
+            {
+                string part = dest + ".part";
+                if (!System.IO.File.Exists(part) || !System.IO.File.Exists(PartMetaPath(dest)))
+                    return 0;
+                Dictionary<string, object> meta = json.Deserialize<Dictionary<string, object>>(
+                    System.IO.File.ReadAllText(PartMetaPath(dest)));
+                if (meta == null || !meta.ContainsKey("name") || !meta.ContainsKey("size"))
+                    return 0;
+                if ((meta["name"] as string) != name || Convert.ToInt64(meta["size"]) != size)
+                    return 0;
+                long have = new System.IO.FileInfo(part).Length;
+                if (have <= 0 || have >= size)
+                    return 0;
+                return have;
+            }
+            catch { return 0; }
+        }
+
         private static string SafeFileName(string name)
         {
             string baseName = System.IO.Path.GetFileName((name ?? string.Empty).Replace('\\', '/'));
             foreach (char bad in System.IO.Path.GetInvalidFileNameChars())
                 baseName = baseName.Replace(bad, '_');
+            // GetInvalidFileNameChars 不含 Windows 保留设备名，也不管尾部空格/点；
+            // "CON.part" 会直接落到设备 CON 上，File.Move 抛异常并留下 .part。
+            baseName = baseName.TrimEnd(' ', '.');
+            string stem = System.IO.Path.GetFileNameWithoutExtension(baseName).ToUpperInvariant();
+            if (stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL"
+                || (stem.Length == 4 && stem.StartsWith("COM") && stem[3] >= '1' && stem[3] <= '9')
+                || (stem.Length == 4 && stem.StartsWith("LPT") && stem[3] >= '1' && stem[3] <= '9'))
+                baseName = "_" + baseName;
             if (baseName.Length == 0 || baseName == "." || baseName == "..")
                 baseName = "file";
             return baseName;
@@ -4231,7 +4534,32 @@ namespace TypeBridgeApp
         private bool UploadOne(string path, TransferProgressForm progress,
                                out string error, out string destination)
         {
-            return FileSender.Upload(ip, filePort, path, progress, out error, out destination);
+            // ip 是 ini 原始串（可能含逗号），直接交给 ConnectAsync 必然失败。
+            // 优先走控制连接实测最快的地址，其余候选依次兜底。
+            string lastProblem = null;
+            foreach (string host in FileTargetHosts())
+            {
+                if (FileSender.Upload(host, filePort, path, progress, out error, out destination))
+                    return true;
+                lastProblem = error;
+            }
+            error = lastProblem ?? "连不上文件端口 " + filePort;
+            destination = null;
+            return false;
+        }
+
+        /// <summary>文件通道该连哪个地址：已选路的控制连接优先，其余候选兜底。</summary>
+        private string[] FileTargetHosts()
+        {
+            List<string> list = new List<string>();
+            if (!string.IsNullOrEmpty(activeHost))
+                list.Add(activeHost);
+            string[] all = hosts != null && hosts.Length > 0
+                ? hosts : Program.ParseHostList(ip);
+            foreach (string host in all)
+                if (!list.Contains(host))
+                    list.Add(host);
+            return list.ToArray();
         }
 
         private static string ReadReply(TcpClient socket)
@@ -4239,23 +4567,10 @@ namespace TypeBridgeApp
             return FileSender.ReadReply(socket);
         }
 
-        /// <summary>把 ip 拆成候选地址列表（逗号 / 分号 / 空白都算分隔符）。</summary>
+        /// <summary>把 ip 拆成候选地址列表；与 CLI 共用同一套分隔符。</summary>
         private void RefreshHosts()
         {
-            List<string> list = new List<string>();
-            if (!string.IsNullOrEmpty(ip))
-            {
-                foreach (string part in ip.Split(new char[] { ',', ';', '\uFF0C', '\uFF1B', ' ' },
-                                                 StringSplitOptions.RemoveEmptyEntries))
-                {
-                    string host = part.Trim();
-                    if (host.Length > 0 && !list.Contains(host))
-                        list.Add(host);
-                }
-            }
-            if (list.Count == 0)
-                list.Add("127.0.0.1");
-            hosts = list.ToArray();
+            hosts = Program.ParseHostList(ip);
         }
 
         /// <summary>在已经连上的 socket 上打一次 PING，返回往返毫秒；失败返回 -1。</summary>
@@ -4272,8 +4587,10 @@ namespace TypeBridgeApp
 
                 byte[] buffer = new byte[256];
                 StringBuilder seen = new StringBuilder();
-                long deadline = Environment.TickCount + timeoutMs;
-                while (Environment.TickCount < deadline)
+                // Environment.TickCount 是 int，加 timeoutMs 会溢出，且约 24.9 天回绕一次；
+                // 用单调的 Stopwatch 计时就没有这个窗口。
+                while ((System.Diagnostics.Stopwatch.GetTimestamp() - started)
+                       * 1000.0 / System.Diagnostics.Stopwatch.Frequency < timeoutMs)
                 {
                     int count = socket.Read(buffer, 0, buffer.Length);
                     if (count <= 0)
@@ -4408,7 +4725,10 @@ namespace TypeBridgeApp
                         }
                         client = candidate;
                         stream = candidate.GetStream();
+                        activeHost = host;
                         lastRttMs = bestRtt;
+                        // 刚连上不能立刻被看门狗判死
+                        lastPongUtc = DateTime.UtcNow;
                         Log.Write("connected " + host + ":" + targetPort
                             + " (" + bestRtt.ToString("0.0") + "ms)");
                         // 写超时：半死链路上 Write 最多卡 4 秒就报错，
@@ -4421,9 +4741,32 @@ namespace TypeBridgeApp
                         // 边缘切换开启且鼠标还在本机时，让鼠标钩子开始盯屏幕边缘
                         mouseHook.Watching = edgeSwitch && !mouseMode;
                         UpdateStatus();
+
+                        // 设置窗口保存会先断开再异步重连；等 stream 真正就绪才恢复，
+                        // 否则 Set*Mode 的 stream==null 守卫会把恢复挡掉。
+                        if (resumeKeyboardAfterReconnect || resumeMouseAfterReconnect)
+                        {
+                            bool wantKeyboard = resumeKeyboardAfterReconnect;
+                            bool wantMouse = resumeMouseAfterReconnect;
+                            resumeKeyboardAfterReconnect = false;
+                            resumeMouseAfterReconnect = false;
+                            SetKeyboardMode(wantKeyboard, false);
+                            if (wantMouse)
+                                SetMouseMode(true, false);
+                        }
                     }));
                 }
-                catch { }
+                catch
+                {
+                    // 句柄销毁导致 BeginInvoke 抛异常时，connecting 会永远卡在 true，
+                    // 之后每秒的重连都被守卫挡住。这里复位并关掉已探测好的候选连接。
+                    connecting = false;
+                    if (candidate != null)
+                    {
+                        try { candidate.Close(); }
+                        catch { }
+                    }
+                }
             });
         }
 
@@ -4433,10 +4776,13 @@ namespace TypeBridgeApp
         {
             try
             {
+                // SIO_KEEPALIVE_VALS 是 3 个 32 位 u_long（onoff / time / interval），
+                // 共 12 字节。原来用 ulong(8B) 写到 offset 8 会越界抛异常被 catch 吞掉，
+                // 结果 keepalive 从未生效，死链路只能靠写超时发现。
                 byte[] values = new byte[12];
-                BitConverter.GetBytes(1ul).CopyTo(values, 0);
-                BitConverter.GetBytes(5000ul).CopyTo(values, 4);
-                BitConverter.GetBytes(2000ul).CopyTo(values, 8);
+                BitConverter.GetBytes((uint)1).CopyTo(values, 0);
+                BitConverter.GetBytes((uint)5000).CopyTo(values, 4);
+                BitConverter.GetBytes((uint)2000).CopyTo(values, 8);
                 tcp.Client.IOControl(IOControlCode.KeepAliveValues, values, null);
             }
             catch { }
@@ -4444,31 +4790,39 @@ namespace TypeBridgeApp
 
         private void StartSender()
         {
-            senderRunning = false;
-            senderThread = new System.Threading.Thread(SenderLoop);
+            NetworkStream target = stream;
+            Queue<string> queue;
+            int generation;
+            lock (sendGate)
+            {
+                queue = new Queue<string>();
+                pendingLines = queue;
+                generation = ++senderGeneration;
+                senderRunning = true;
+            }
+            senderThread = new System.Threading.Thread(
+                delegate() { SenderLoop(target, queue, generation); });
             senderThread.IsBackground = true;
             senderThread.Name = "TypeBridge-Sender";
-            senderRunning = true;
             senderThread.Start();
         }
 
-        private void SenderLoop()
+        private void SenderLoop(NetworkStream target, Queue<string> queue, int generation)
         {
-            while (senderRunning)
+            while (senderRunning && senderGeneration == generation)
             {
                 string line = null;
                 lock (sendGate)
                 {
-                    if (pendingLines.Count > 0)
-                        line = pendingLines.Dequeue();
+                    if (queue.Count > 0)
+                        line = queue.Dequeue();
                 }
                 if (line == null)
                 {
                     System.Threading.Thread.Sleep(2);
                     continue;
                 }
-                NetworkStream target = stream;
-                if (target == null)
+                if (target == null || senderGeneration != generation)
                     continue;
                 try
                 {
@@ -4478,7 +4832,7 @@ namespace TypeBridgeApp
                 }
                 catch
                 {
-                    NotifyConnectionLost();
+                    NotifyConnectionLost(generation);
                     return;
                 }
             }
@@ -4486,8 +4840,11 @@ namespace TypeBridgeApp
 
         /// <summary>发送线程发现断链后回到 UI 线程收尾：断开并把键鼠切回 Windows。
         /// 这是兜底保护——即使切换热键在断链期间失灵，用户也不会被卡在 Ubuntu 模式。</summary>
-        private void NotifyConnectionLost()
+        private void NotifyConnectionLost(int generation)
         {
+            // 旧世代的发送线程写失败时不能动刚建好的新连接
+            if (generation != senderGeneration)
+                return;
             try
             {
                 hotkeyForm.BeginInvoke(new MethodInvoker(delegate
@@ -4519,13 +4876,19 @@ namespace TypeBridgeApp
                 pingSentTs = System.Diagnostics.Stopwatch.GetTimestamp();
                 SendLine("PING");
 
-                if ((keyboardMode || mouseMode) && (DateTime.UtcNow - lastPongUtc).TotalSeconds > 3)
+                // PING 每秒都发，收不到 PONG 就是半死链路。原来只在接管态检查，
+                // 于是 Windows 模式下链路僵死时既不重连也不报错，托盘一直显示已连接。
+                if ((DateTime.UtcNow - lastPongUtc).TotalSeconds > 3)
                 {
+                    bool wasActive = keyboardMode || mouseMode;
                     Log.Write("watchdog: no pong for " + (DateTime.UtcNow - lastPongUtc).TotalSeconds.ToString("0.0")
-                        + "s, back to Windows");
-                    ShowTrayTip("已切回本机", "3 秒没收到 Ubuntu 回应，先把键盘鼠标还给你");
-                    SetKeyboardMode(false, false);
-                    SetMouseMode(false, false);
+                        + "s, reconnect (wasActive=" + wasActive + ")");
+                    if (wasActive)
+                    {
+                        ShowTrayTip("已切回本机", "3 秒没收到 Ubuntu 回应，先把键盘鼠标还给你");
+                        SetKeyboardMode(false, false);
+                        SetMouseMode(false, false);
+                    }
                     CloseConnection();
                     return;
                 }
@@ -4548,6 +4911,8 @@ namespace TypeBridgeApp
             catch { }
             client = null;
             stream = null;
+            // 作废旧发送线程：它持有自己的队列与流，醒来后看到世代不符就退出
+            senderGeneration++;
             senderRunning = false;
             lock (sendGate)
             {

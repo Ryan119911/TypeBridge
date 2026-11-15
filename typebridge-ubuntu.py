@@ -34,6 +34,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 
@@ -707,12 +708,13 @@ _seq = {"clip": 0}
 def broadcast(line):
     data = (line + "\n").encode("utf-8")
     sent = 0
-    for st in list(CONNS.values()):
+    for fd, st in list(CONNS.items()):
         try:
             st["sock"].sendall(data)
             sent += 1
         except OSError:
-            pass
+            # 已经发出半行，留着只会让对端把残帧和下一行拼在一起
+            drop(fd, "broadcast failed")
     return sent
 
 
@@ -1142,6 +1144,9 @@ def handle_line(line, sock):
     if line.startswith("DIR "):
         target = line[4:].strip()
         # 空值表示「用默认桌面」：客户端 UI 是唯一事实来源，不能沿用上次的旧路径
+        if target and not valid_file_dir(target):
+            log("DIR rejected: %r" % target[:120])
+            return True
         CONF["file_dir"] = target
         try:
             os.makedirs(resolve_file_dir(), exist_ok=True)
@@ -1327,6 +1332,8 @@ srv = None
 # ---------- 文件接收（独立端口：一行头 + 原始字节） ----------
 
 FILE_MAX_NAME = 180
+CLIPIMG_MAX_BYTES = 64 << 20      # 剪贴板图片只进内存，必须有上限
+CLIPIMG_MAX_TEXT = 1 << 20
 
 
 def safe_name(name):
@@ -1344,6 +1351,19 @@ def safe_name(name):
 def unique_path(directory, name):
     """同名只保留一份：直接覆盖，不再生成 (1)、(2) 副本。"""
     return os.path.join(directory, name)
+
+
+def valid_file_dir(target):
+    """拒绝路径穿越和系统目录：控制端口没有认证，DIR 是可被任意对端改写的持久化配置。"""
+    if ".." in target.replace("\\", "/").split("/"):
+        return False
+    path = os.path.abspath(os.path.expanduser(target))
+    blocked = ("/etc", "/usr", "/bin", "/sbin", "/lib", "/proc", "/sys",
+               "/dev", "/boot", "/root", "/var", "/opt")
+    for prefix in blocked:
+        if path == prefix or path.startswith(prefix + os.sep):
+            return False
+    return True
 
 
 def resolve_file_dir(name=""):
@@ -1366,6 +1386,19 @@ def resolve_file_dir(name=""):
 
 def part_meta_path(dest):
     return dest + ".part.info"
+
+
+_PART_LOCKS = {}
+_PART_LOCKS_GUARD = threading.Lock()
+
+
+def part_lock_for(dest):
+    with _PART_LOCKS_GUARD:
+        lock = _PART_LOCKS.get(dest)
+        if lock is None:
+            lock = threading.Lock()
+            _PART_LOCKS[dest] = lock
+        return lock
 
 
 def resume_offset(dest, name, size):
@@ -1407,19 +1440,21 @@ def handle_upload(conn, addr):
             return
 
         if parts[0] == "RESUME":
-            # 断点续传握手：告诉发送方 .part 里已经有几个字节
-            raw = parts[2]
-            name, _, tail = raw.rpartition(" ")
-            if not tail.isdigit():
-                name = raw
-            name = safe_name(name)
+            # 断点续传握手：告诉发送方 .part 里已经有几个字节。
+            # 头是 "RESUME <总大小> <文件名>"，第三段整体就是文件名、没有偏移字段；
+            # 原来按空格 rpartition 会把 "IMG 2" 截成 "IMG"，与 UPLOAD 分支不一致。
+            name = safe_name(parts[2])
             dest = unique_path(resolve_file_dir(name), name)
-            have = resume_offset(dest, name, size)
+            with part_lock_for(dest):
+                have = resume_offset(dest, name, size)
             log("resume query: %s have %d/%d" % (name, have, size))
             conn.sendall(("HAVE %d\n" % have).encode("utf-8"))
             return
 
         if parts[0] == "CLIPIMG":
+            if size > CLIPIMG_MAX_BYTES:
+                conn.sendall(b"ERR clipboard too large\n")
+                return
             # 剪贴板图片：只进内存，不落盘。
             # 第三段是可选文本长度；旧版客户端这里放的是文件名，解析失败按 0 处理。
             try:
@@ -1428,6 +1463,9 @@ def handle_upload(conn, addr):
                 caption_len = 0
             if caption_len < 0:
                 caption_len = 0
+            if caption_len > CLIPIMG_MAX_TEXT:
+                conn.sendall(b"ERR clipboard too large\n")
+                return
 
             data = bytearray()
             while len(data) < size:
@@ -1453,12 +1491,19 @@ def handle_upload(conn, addr):
             conn.sendall(b"OK clipboard\n")
             return
 
-        # 第四段是可选的续传偏移；旧版客户端只发文件名，这里解析不到数字就当从头传
+        # 第四段是可选的续传偏移。文件名本身可能以「空格 + 数字」结尾（如 IMG 2），
+        # 只有确实存在匹配的断点记录时才把尾段当偏移，否则整段都当文件名。
         raw = parts[2]
         name, _, tail = raw.rpartition(" ")
         offset = 0
         if tail.isdigit():
-            offset = int(tail)
+            candidate = safe_name(name)
+            candidate_dest = unique_path(resolve_file_dir(candidate), candidate)
+            if resume_offset(candidate_dest, candidate, size) == int(tail):
+                offset = int(tail)
+                name = candidate
+            else:
+                name = raw
         else:
             name = raw
         name = safe_name(name)
@@ -1467,66 +1512,67 @@ def handle_upload(conn, addr):
         dest = unique_path(directory, name)
         temp_dest = dest + ".part"
 
-        if offset > 0:
-            try:
-                have = os.path.getsize(temp_dest)
-            except OSError:
-                have = 0
-            if have < offset or offset > size:
-                log("file: %s 断点 %d 与本地 %d 不符，改为从头传" % (name, offset, have))
-                offset = 0
-
-        if offset > 0:
-            log("file: %s 从 %d/%d (%d%%) 续传"
-                % (name, offset, size, offset * 100 // max(1, size)))
-
-        started = time.time()
-        received = offset
-        last_mark = offset
-        mode = "r+b" if offset > 0 else "wb"
-        with open(temp_dest, mode) as out:
+        with part_lock_for(dest):
             if offset > 0:
-                out.seek(offset)
-                out.truncate(offset)
-            else:
                 try:
-                    with open(part_meta_path(dest), "w", encoding="utf-8") as meta:
-                        json.dump({"name": name, "size": size}, meta)
+                    have = os.path.getsize(temp_dest)
                 except OSError:
-                    pass
-            while received < size:
-                chunk = stream.read(min(1 << 18, size - received))
-                if not chunk:
-                    break
-                out.write(chunk)
-                received += len(chunk)
-                # 大文件按 25% 打点，出问题能看出断在第几段
-                if size >= (64 << 20) and received - last_mark >= size // 4:
-                    last_mark = received
-                    log("file: %s %d%% (%d/%d MB)"
-                        % (name, received * 100 // size, received >> 20, size >> 20))
+                    have = 0
+                if have < offset or offset > size:
+                    log("file: %s 断点 %d 与本地 %d 不符，改为从头传" % (name, offset, have))
+                    offset = 0
 
-        if received != size:
-            # 保留 .part 和 .part.info：下次同一个文件重发就能接着传
-            log("file: incomplete %s (%d/%d) from %s，断点已保留"
-                % (name, received, size, addr[0]))
-            conn.sendall(b"ERR incomplete\n")
-            return
+            if offset > 0:
+                log("file: %s 从 %d/%d (%d%%) 续传"
+                    % (name, offset, size, offset * 100 // max(1, size)))
 
-        # 原子替换：要么是完整的旧文件，要么是完整的新文件，不会留下半截或副本
-        os.replace(temp_dest, dest)
-        try:
-            os.remove(part_meta_path(dest))
-        except OSError:
-            pass
+            started = time.time()
+            received = offset
+            last_mark = offset
+            mode = "r+b" if offset > 0 else "wb"
+            with open(temp_dest, mode) as out:
+                if offset > 0:
+                    out.seek(offset)
+                    out.truncate(offset)
+                else:
+                    try:
+                        with open(part_meta_path(dest), "w", encoding="utf-8") as meta:
+                            json.dump({"name": name, "size": size}, meta)
+                    except OSError:
+                        pass
+                while received < size:
+                    chunk = stream.read(min(1 << 18, size - received))
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    received += len(chunk)
+                    # 大文件按 25% 打点，出问题能看出断在第几段
+                    if size >= (64 << 20) and received - last_mark >= size // 4:
+                        last_mark = received
+                        log("file: %s %d%% (%d/%d MB)"
+                            % (name, received * 100 // size, received >> 20, size >> 20))
 
-        elapsed = max(0.001, time.time() - started)
-        log("file <- %s (%d bytes, 本次 %d bytes, %.1f MB/s%s) -> %s"
-            % (name, size, size - offset, (size - offset) / elapsed / 1048576.0,
-               "，续传" if offset else "", dest))
-        # 桌面提醒：接收方也要知道文件落在哪个目录，不然只能自己翻
-        _tray_notify("收到文件", "%s\n→ %s" % (name, os.path.dirname(dest)))
-        conn.sendall(("OK " + dest + "\n").encode("utf-8"))
+            if received != size:
+                # 保留 .part 和 .part.info：下次同一个文件重发就能接着传
+                log("file: incomplete %s (%d/%d) from %s，断点已保留"
+                    % (name, received, size, addr[0]))
+                conn.sendall(b"ERR incomplete\n")
+                return
+
+            # 原子替换：要么是完整的旧文件，要么是完整的新文件，不会留下半截或副本
+            os.replace(temp_dest, dest)
+            try:
+                os.remove(part_meta_path(dest))
+            except OSError:
+                pass
+
+            elapsed = max(0.001, time.time() - started)
+            log("file <- %s (%d bytes, 本次 %d bytes, %.1f MB/s%s) -> %s"
+                % (name, size, size - offset, (size - offset) / elapsed / 1048576.0,
+                   "，续传" if offset else "", dest))
+            # 桌面提醒：接收方也要知道文件落在哪个目录，不然只能自己翻
+            _tray_notify("收到文件", "%s\n→ %s" % (name, os.path.dirname(dest)))
+            conn.sendall(("OK " + dest + "\n").encode("utf-8"))
     except Exception as e:
         log("file upload failed: %r" % (e,))
         try:
@@ -1575,10 +1621,37 @@ def outbox_dir():
 
 def push_file(path, host, port):
     size = os.path.getsize(path)
+    name = os.path.basename(path)
+    offset = 0
+
+    # 先问对端已有多少字节；旧版接收端回 ERR bad header 时按从头传走老协议。
+    # 与 Windows -> Ubuntu 方向用同一套 HAVE / UPLOAD ... <offset> 约定。
+    try:
+        probe = socket.create_connection((host, port), 5)
+        try:
+            probe.settimeout(5)
+            probe.sendall(("RESUME %d %s\n" % (size, name)).encode("utf-8"))
+            answer = probe.makefile("rb").readline(4096).decode("utf-8", "replace").strip()
+            if answer.startswith("HAVE "):
+                have = int(answer[5:].strip())
+                if 0 < have < size:
+                    offset = have
+        finally:
+            probe.close()
+    except Exception as e:
+        log("outbox resume probe failed: %r" % (e,))
+
     sock = socket.create_connection((host, port), 5)
     try:
-        sock.sendall(("UPLOAD %d %s\n" % (size, os.path.basename(path))).encode("utf-8"))
+        # 只有 connect 超时不够：对端僵住时 sendall / readline 会永久占住 in-flight
+        sock.settimeout(60)
+        header = "UPLOAD %d %s" % (size, name)
+        if offset:
+            header += " %d" % offset
+        sock.sendall((header + "\n").encode("utf-8"))
         with open(path, "rb") as source:
+            if offset:
+                source.seek(offset)
             while True:
                 chunk = source.read(1 << 16)
                 if not chunk:
@@ -1592,22 +1665,38 @@ def push_file(path, host, port):
             pass
 
 
+OUTBOX_INFLIGHT = set()
+OUTBOX_GUARD = threading.Lock()
+OUTBOX_NEXT_TRY = {}
+
+
 def outbox_worker(path):
-    peer = LAST_PEER["addr"]
-    if not peer:
-        return
-    port = int(CONF.get("file_recv_port", 4323))
     try:
-        reply = push_file(path, peer, port)
-        if reply.startswith("OK"):
-            done = os.path.join(os.path.dirname(path), "已发送")
-            os.makedirs(done, exist_ok=True)
-            os.replace(path, os.path.join(done, os.path.basename(path)))
-            log("outbox -> %s: %s" % (peer, os.path.basename(path)))
-        else:
-            log("outbox failed: %s" % reply)
-    except Exception as e:
-        log("outbox error: %r" % (e,))
+        peer = LAST_PEER["addr"]
+        if not peer:
+            return
+        port = int(CONF.get("file_recv_port", 4323))
+        try:
+            reply = push_file(path, peer, port)
+            if reply.startswith("OK"):
+                done = os.path.join(os.path.dirname(path), "已发送")
+                os.makedirs(done, exist_ok=True)
+                os.replace(path, os.path.join(done, os.path.basename(path)))
+                with OUTBOX_GUARD:
+                    OUTBOX_NEXT_TRY.pop(path, None)
+                log("outbox -> %s: %s" % (peer, os.path.basename(path)))
+            else:
+                raise RuntimeError(reply or "no reply")
+        except Exception as e:
+            # 连不上 Windows 时不要每 2 秒重试 + 刷日志，退避 30 秒
+            with OUTBOX_GUARD:
+                now = time.time()
+                if OUTBOX_NEXT_TRY.get(path, 0) <= now:
+                    log("outbox failed (retry in 30s): %s: %r" % (os.path.basename(path), e))
+                OUTBOX_NEXT_TRY[path] = now + 30
+    finally:
+        with OUTBOX_GUARD:
+            OUTBOX_INFLIGHT.discard(path)
 
 
 def scan_outbox():
@@ -1616,10 +1705,17 @@ def scan_outbox():
         if not os.path.isdir(directory):
             os.makedirs(directory, exist_ok=True)
         if os.path.isdir(directory):
+            now = time.time()
             for name in sorted(os.listdir(directory)):
                 path = os.path.join(directory, name)
-                if os.path.isfile(path):
-                    threading.Thread(target=outbox_worker, args=(path,), daemon=True).start()
+                if not os.path.isfile(path):
+                    continue
+                # 没有 in-flight 集合时，一个传得慢的大文件会被每 2 秒重复起线程并发重发
+                with OUTBOX_GUARD:
+                    if path in OUTBOX_INFLIGHT or OUTBOX_NEXT_TRY.get(path, 0) > now:
+                        continue
+                    OUTBOX_INFLIGHT.add(path)
+                threading.Thread(target=outbox_worker, args=(path,), daemon=True).start()
     except Exception as e:
         log("outbox scan error: %r" % (e,))
     return True

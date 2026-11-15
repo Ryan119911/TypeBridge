@@ -262,10 +262,13 @@ namespace TypeBridgeApp
 
             StackPanel layoutBody = new StackPanel();
             UIElement layoutCard = Card("屏幕排列", layoutBody);
-            arranger.Edge = initialEdge;
+            // 有摆放位置就以它为准（SetOffset 会按主方向派生切屏方向）；
+            // 只有没有位置时才用 ini 里的 switch_edge，避免先设再被静默覆盖。
             double offsetX, offsetY;
             if (TryParseOffset(initialOffset, out offsetX, out offsetY))
                 arranger.SetOffset(offsetX, offsetY);
+            else
+                arranger.Edge = initialEdge;
             layoutBody.Children.Add(arranger);
             TextBlock hint = Note("按住 Ubuntu 方块拖到任意位置：上下左右或四个角都行，靠近整齐位置会自动吸附");
             hint.Margin = new Thickness(0, 8, 0, 0);
@@ -553,6 +556,10 @@ namespace TypeBridgeApp
             Hotkey newMouse = mouseCapture.Value ?? Hotkey.DefaultMouse();
             if (!newMouse.IsValidHotkey)
             { Fail("鼠标快捷键需要至少一个修饰键（Ctrl / Alt / Shift），或使用 ScrollLock / Pause / Menu 这类无冲突整键"); return; }
+            if (!linkMouse && newKeyboard.Key == newMouse.Key
+                && newKeyboard.Ctrl == newMouse.Ctrl && newKeyboard.Alt == newMouse.Alt
+                && newKeyboard.Shift == newMouse.Shift && newKeyboard.Win == newMouse.Win)
+            { Fail("键盘和鼠标快捷键不能相同，分开切换时鼠标快捷键会失效"); return; }
 
             Host = newHost;
             Port = newPort;
@@ -883,9 +890,9 @@ namespace TypeBridgeApp
         /// </summary>
         private sealed class ScreenArranger : Canvas
         {
-            private const double BoxW = 132;
-            private const double BoxH = 82;
-            private const double Gap = 18;
+            private const double BoxW = LayoutMath.BoxW;
+            private const double BoxH = LayoutMath.BoxH;
+            private const double Gap = LayoutMath.Gap;
             private const double CanvasH = 232;
             private const double Magnet = 18;      // 离整齐位置多近就吸过去
             private const double Padding = 4;
@@ -1085,14 +1092,8 @@ namespace TypeBridgeApp
             /// <summary>松手：按偏移的主方向决定从哪条边切屏，斜角也算（左上/右下等）。</summary>
             private void CommitDrop()
             {
-                double stepX = BoxW + Gap;
-                double stepY = BoxH + Gap;
-
-                // 斜放在四角时，主方向取偏移更大的那个轴，保证切屏行为确定
-                if (Math.Abs(offsetX) / stepX >= Math.Abs(offsetY) / stepY)
-                    edge = offsetX < 0 ? "left" : "right";
-                else
-                    edge = offsetY < 0 ? "top" : "bottom";
+                // 与运行时共用 LayoutMath，避免设置页显示的方向和实际切屏方向分叉
+                edge = LayoutMath.EdgeFromOffset(offsetX, offsetY);
 
                 Arrange();
                 Notify();

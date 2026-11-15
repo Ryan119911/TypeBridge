@@ -17,6 +17,18 @@ jobs:
       - name: 检出源码
         uses: actions/checkout@v4
 
+      - name: 写入版本号
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart('v')
+          if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "tag 不是版本号：$v" }
+          $p = "TypeBridge.cs"
+          $s = [System.IO.File]::ReadAllText($p)
+          $s2 = $s -replace 'AssemblyVersion\("\d+\.\d+\.\d+\.\d+"\)', ('AssemblyVersion("' + $v + '.0")')
+          if ($s2 -eq $s) { throw "没找到 AssemblyVersion" }
+          [System.IO.File]::WriteAllText($p, $s2, (New-Object System.Text.UTF8Encoding($true)))
+
       - name: 编译 TypeBridge.exe
         shell: pwsh
         run: |
@@ -72,7 +84,7 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             export VERSION="${GITHUB_REF_NAME#v}"
           else
-            export VERSION="3.6.1"
+            export VERSION="3.6.2"
           fi
           bash ubuntu/build-deb.sh
 

@@ -9,7 +9,8 @@ After=graphical-session.target
 ExecStart=/usr/lib/typebridge/typebridge-daemon
 Restart=on-failure
 RestartSec=2
-Environment=DISPLAY=:0
+# DISPLAY 由守护进程按实际的 X socket 自选：gdm 登录界面常有一个可连的 :0，
+# 写死会让用户会话（常见 :2）永远连不上，GTK/XTEST 全部失效。
 Environment=GTK_IM_MODULE=fcitx
 Environment=QT_IM_MODULE=fcitx
 Environment=XMODIFIERS=@im=fcitx

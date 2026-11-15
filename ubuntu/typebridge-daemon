@@ -14,10 +14,8 @@ set -e
 runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 home="${HOME:-/root}"
 
-if [ -z "${DISPLAY:-}" ]; then
-    DISPLAY=":0"
-    export DISPLAY
-fi
+# 不写死 DISPLAY：Python 端 _early_pick_display() 会按 /tmp/.X11-unix 里
+# 真实可用的 socket 选择并设置 os.environ["DISPLAY"]（在 import Gtk 之前）。
 
 if [ -n "${XAUTHORITY:-}" ] && [ -r "${XAUTHORITY}" ]; then
     : # 调用方显式给了可用的，尊重它
