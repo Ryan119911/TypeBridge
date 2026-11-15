@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.6.2.0")]
+[assembly: AssemblyVersion("3.6.3.0")]
 
 namespace TypeBridgeApp
 {
@@ -1722,9 +1722,10 @@ namespace TypeBridgeApp
                                     tracking = false;
                                     pendingDx = 0;
                                     pendingDy = 0;
-                                    // 刚回来的一小段时间不许再切走，否则鼠标在边缘上就是来回抖
+                                    // 刚回来的一段时间不许再切走：500ms 太短，实测会在
+                                    // 0.4~0.9 秒后立刻又切过去，形成来回抖。
                                     edgeArmed = false;
-                                    edgeCooldownUntil = unchecked(Environment.TickCount + 500);
+                                    edgeCooldownUntil = unchecked(Environment.TickCount + 1200);
                                     Log.Write("edge return (vx=" + virtualX + " vy=" + virtualY + ")");
                                     EventHandler returned = EdgeReturned;
                                     if (returned != null)
@@ -4876,16 +4877,22 @@ namespace TypeBridgeApp
                 pingSentTs = System.Diagnostics.Stopwatch.GetTimestamp();
                 SendLine("PING");
 
-                // PING 每秒都发，收不到 PONG 就是半死链路。原来只在接管态检查，
-                // 于是 Windows 模式下链路僵死时既不重连也不报错，托盘一直显示已连接。
-                if ((DateTime.UtcNow - lastPongUtc).TotalSeconds > 3)
+                // 接管态 3 秒兜底（不能把人困在远端）；Windows 模式下放宽到 8 秒。
+                // 3.6.2 曾让两种状态都用 3 秒：一次 4 秒的网络抖动就触发断线，
+                // 而链路恢复前重连要十几秒，期间 Watching=false、边缘切屏完全没反应，
+                // 表现就是「推两下没成功，隔一阵才切过去」。
+                // 链路真死时 SenderLoop 的 WriteTimeout(4s) 会走 NotifyConnectionLost 兜底。
+                bool activeMode = keyboardMode || mouseMode;
+                double limitSeconds = activeMode ? 3 : 8;
+                double silentSeconds = (DateTime.UtcNow - lastPongUtc).TotalSeconds;
+                if (silentSeconds > limitSeconds)
                 {
-                    bool wasActive = keyboardMode || mouseMode;
-                    Log.Write("watchdog: no pong for " + (DateTime.UtcNow - lastPongUtc).TotalSeconds.ToString("0.0")
-                        + "s, reconnect (wasActive=" + wasActive + ")");
-                    if (wasActive)
+                    Log.Write("watchdog: no pong for " + silentSeconds.ToString("0.0")
+                        + "s (limit=" + limitSeconds.ToString("0") + "), reconnect (wasActive="
+                        + activeMode + ")");
+                    if (activeMode)
                     {
-                        ShowTrayTip("已切回本机", "3 秒没收到 Ubuntu 回应，先把键盘鼠标还给你");
+                        ShowTrayTip("已切回本机", "没收到 Ubuntu 回应，先把键盘鼠标还给你");
                         SetKeyboardMode(false, false);
                         SetMouseMode(false, false);
                     }
