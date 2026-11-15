@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.6.3.0")]
+[assembly: AssemblyVersion("3.6.4.0")]
 
 namespace TypeBridgeApp
 {
@@ -1409,9 +1409,20 @@ namespace TypeBridgeApp
             get { return watching; }
             set
             {
+                // 只有「重新开启监视」才重置武装状态。切回 Windows 时
+                // EdgeReturned 会把 edgeArmed 置 false，避免光标仍停在边缘
+                // 就立刻又切过去；无条件重置会把这个保护每次都抹掉。
+                bool wasWatching = watching;
                 watching = value;
-                edgeArmed = true;
-                edgeHits = 0;
+                if (value && !wasWatching)
+                {
+                    edgeArmed = true;
+                    edgeHits = 0;
+                }
+                else if (!value)
+                {
+                    edgeHits = 0;
+                }
             }
         }
 
@@ -1722,10 +1733,11 @@ namespace TypeBridgeApp
                                     tracking = false;
                                     pendingDx = 0;
                                     pendingDy = 0;
-                                    // 刚回来的一段时间不许再切走：500ms 太短，实测会在
-                                    // 0.4~0.9 秒后立刻又切过去，形成来回抖。
+                                    // 先撤掉武装：光标回到屏幕内部才重新 armed。
+                                    // 时间冷却只留很短一段兜底，主要靠 armed 机制，
+                                    // 否则「切回后想马上再切过去」会被硬等一秒多。
                                     edgeArmed = false;
-                                    edgeCooldownUntil = unchecked(Environment.TickCount + 1200);
+                                    edgeCooldownUntil = unchecked(Environment.TickCount + 300);
                                     Log.Write("edge return (vx=" + virtualX + " vy=" + virtualY + ")");
                                     EventHandler returned = EdgeReturned;
                                     if (returned != null)
@@ -3532,22 +3544,25 @@ namespace TypeBridgeApp
             Point p = Cursor.Position;
             int rx;
             int ry;
+            // 原来 right 边只给 rx=1，而切回判定是 vx < 0：鼠标往回轻移
+            // 2~3px 就立刻切回，表现就是「切过去马上弹回来，像没切成功」。
+            const int margin = 12;
             switch (switchEdge)
             {
                 case "left":
-                    rx = remoteWidth - 2;
+                    rx = Math.Max(margin, remoteWidth - margin);
                     ry = MapRange(p.Y - b.Top, b.Height, remoteHeight, 0);
                     break;
                 case "top":
                     rx = MapRange(p.X - b.Left, b.Width, remoteWidth, 0);
-                    ry = remoteHeight - 2;
+                    ry = Math.Max(margin, remoteHeight - margin);
                     break;
                 case "bottom":
                     rx = MapRange(p.X - b.Left, b.Width, remoteWidth, 0);
-                    ry = 1;
+                    ry = margin;
                     break;
                 default:
-                    rx = 1;
+                    rx = margin;
                     ry = MapRange(p.Y - b.Top, b.Height, remoteHeight, 0);
                     break;
             }
@@ -3559,22 +3574,25 @@ namespace TypeBridgeApp
             Rectangle b = Screen.PrimaryScreen.Bounds;
             int wx;
             int wy;
+            // 原来把光标放回 b.Right - 2，仍压在判定线上：armed 撤掉后光标
+            // 一直不满足 away 条件，用户继续往外推也没反应，得先挪开再推回来。
+            const int gap = 40;
             switch (switchEdge)
             {
                 case "left":
-                    wx = b.Left + 1;
+                    wx = b.Left + gap;
                     wy = MapRange(mouseHook.VirtualY, remoteHeight, b.Height, b.Top);
                     break;
                 case "top":
                     wx = MapRange(mouseHook.VirtualX, remoteWidth, b.Width, b.Left);
-                    wy = b.Top + 1;
+                    wy = b.Top + gap;
                     break;
                 case "bottom":
                     wx = MapRange(mouseHook.VirtualX, remoteWidth, b.Width, b.Left);
-                    wy = b.Bottom - 2;
+                    wy = b.Bottom - gap;
                     break;
                 default:
-                    wx = b.Right - 2;
+                    wx = b.Right - gap;
                     wy = MapRange(mouseHook.VirtualY, remoteHeight, b.Height, b.Top);
                     break;
             }
