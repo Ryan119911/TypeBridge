@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.6.4.0")]
+[assembly: AssemblyVersion("3.6.5.0")]
 
 namespace TypeBridgeApp
 {
@@ -866,6 +866,24 @@ namespace TypeBridgeApp
                 throw new Win32Exception(Marshal.GetLastWin32Error());
         }
 
+        /// <summary>
+        /// 低级钩子可能被 Windows 静默摘除：回调偶发超时后，系统把它从钩子链里摘掉，
+        /// 却不通知进程，句柄值仍然非 0 —— Install() 的幂等保护于是永远挡住重装。
+        /// 表现就是进程活着、TCP 正常、看门狗也不报错，但按键和热键都不再触发。
+        /// 这里先摘旧句柄再重装，绕过幂等保护；只在非接管态调用，避免打断输入转发。
+        /// </summary>
+        internal void Reinstall()
+        {
+            IntPtr old = hook;
+            hook = IntPtr.Zero;
+            if (old != IntPtr.Zero)
+            {
+                try { UnhookWindowsHookEx(old); }
+                catch { }
+            }
+            Install();
+        }
+
         private static string ModifierName(int virtualKey)
         {
             switch (virtualKey)
@@ -1539,6 +1557,19 @@ namespace TypeBridgeApp
             if (hook == IntPtr.Zero)
                 throw new Win32Exception(Marshal.GetLastWin32Error());
             UpdateTimer();
+        }
+
+        /// <summary>同 GlobalKeyboardHook.Reinstall：强制重建被系统静默摘掉的低级鼠标钩子。</summary>
+        internal void Reinstall()
+        {
+            IntPtr old = hook;
+            hook = IntPtr.Zero;
+            if (old != IntPtr.Zero)
+            {
+                try { UnhookWindowsHookEx(old); }
+                catch { }
+            }
+            Install();
         }
 
         /// <summary>
@@ -2864,6 +2895,7 @@ namespace TypeBridgeApp
         private readonly ToolStripMenuItem dropPadItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem exitItem = new ToolStripMenuItem();
         private readonly Timer connectionTimer = new Timer();
+        private DateTime lastHookHealUtc = DateTime.UtcNow;
         private readonly JavaScriptSerializer json = new JavaScriptSerializer();
 
         private TcpClient client;
@@ -4885,11 +4917,41 @@ namespace TypeBridgeApp
         }
 
         /// <summary>
+        /// 输入自愈：低级键盘/鼠标钩子有概率被 Windows 静默摘除（回调偶发超时被摘，
+        /// 进程不收到任何通知，句柄值却仍非 0）。一旦发生，按热键和推边缘都石沉大海，
+        /// 而进程、TCP 连接、网络看门狗全部正常 —— 只能靠这里定期强制重装恢复。
+        ///
+        /// 只在非接管态、非设置窗口时做：接管态正在转发输入，重装会漏事件；
+        /// 设置窗口本来就主动摘了热键和钩子，不去打扰。重注册热键可顺带恢复被
+        /// 其他程序挤掉后一直没回来的全局热键。
+        /// </summary>
+        private void SelfHealInput()
+        {
+            if (keyboardMode || mouseMode || settingsOpen)
+                return;
+            if ((DateTime.UtcNow - lastHookHealUtc).TotalSeconds < 30)
+                return;
+            lastHookHealUtc = DateTime.UtcNow;
+            try
+            {
+                hook.Reinstall();
+                mouseHook.Reinstall();
+                ApplyHotkeys();
+                Log.Write("input self-heal: hooks + hotkeys reinstalled");
+            }
+            catch (Exception ex)
+            {
+                Log.Write("input self-heal failed: " + ex.Message);
+            }
+        }
+
+        /// <summary>
         /// 每秒一次：发心跳；半开连接收不到 PONG 就把键鼠还给本机，
         /// 避免"网络断了但 TCP 没报错"时人被困在 Ubuntu 模式。
         /// </summary>
         private void ConnectionTick()
         {
+            SelfHealInput();
             if (stream != null)
             {
                 pingSentTs = System.Diagnostics.Stopwatch.GetTimestamp();
