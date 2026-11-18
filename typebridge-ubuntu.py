@@ -57,6 +57,26 @@ faulthandler.enable()
 
 # ---- 必须在任何 Gtk/Gdk 调用之前选定 DISPLAY ----
 # Gtk.Clipboard.get() 在模块导入阶段就会初始化 GTK；写死 :0 会让整个 GUI 栈失效。
+def _session_display_hint():
+    """会话真正的 DISPLAY。
+
+    systemd 用户服务里的 DISPLAY 常常被写死成 :0，而登录后 X server 可能是 :1/:2；
+    /tmp/.X11-unix 里还可能躺着别的 X 服务器（Xvfb 之类的虚拟屏）。只按 socket
+    新旧排序会连到虚拟屏上——表现就是"键鼠注进去了但屏幕没反应"。
+    用户管理器的环境变量是会话真实值，优先采信。
+    """
+    try:
+        result = subprocess.run(["systemctl", "--user", "show-environment"],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                timeout=2)
+        for line in result.stdout.decode("utf-8", "replace").splitlines():
+            if line.startswith("DISPLAY="):
+                return line.split("=", 1)[1].strip()
+    except Exception:
+        pass
+    return ""
+
+
 def _early_pick_display():
     try:
         import ctypes
@@ -74,6 +94,9 @@ def _early_pick_display():
     displays = []
     if os.environ.get("DISPLAY"):
         displays.append(os.environ["DISPLAY"])
+    hint = _session_display_hint()
+    if hint and hint not in displays:
+        displays.append(hint)
     try:
         socks = []
         for name in os.listdir("/tmp/.X11-unix"):
@@ -435,11 +458,17 @@ def pick_display():
 
 
 def _display_candidates():
-    """列出可能的显示：先环境变量，再从 /tmp/.X11-unix 里按时间新的优先。"""
+    """列出可能的显示：环境变量 -> 会话真实值 -> /tmp/.X11-unix 里按时间新的优先。
+
+    只按 socket 新旧排会踩到虚拟屏（Xvfb 往往比真实 Xorg 新），先问会话要真实值。
+    """
     found = []
     env = os.environ.get("DISPLAY", "")
     if env:
         found.append(env)
+    hint = _session_display_hint()
+    if hint and hint not in found:
+        found.append(hint)
     try:
         socks = []
         for name in os.listdir("/tmp/.X11-unix"):
