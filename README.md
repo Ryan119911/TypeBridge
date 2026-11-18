@@ -6,7 +6,7 @@
 
 TypeBridge 让 Windows 上的输入直接进入 Ubuntu 当前窗口：键盘、鼠标、剪贴板、文件全部打通，随时用一个键在两台机器之间来回切。它只转发输入、不传画面，所以几乎不占带宽；中文由 **Ubuntu 自己的输入法**组词选字，候选窗口和词库都还是你熟悉的那一套。
 
-反过来也一样：坐在 Ubuntu 前面时按一个键（默认 `Ctrl + Alt + W`），共享就调个头，用 Ubuntu 的键鼠操作 Windows——两台机器谁都能当主机。
+反过来也一样：坐在 Ubuntu 前面时按一个键（默认 `Ctrl + Alt + U`），共享就调个头，用 Ubuntu 的键鼠操作 Windows——两台机器谁都能当主机。
 
 [![Build TypeBridge](https://github.com/Ryan119911/TypeBridge/actions/workflows/build.yml/badge.svg)](https://github.com/Ryan119911/TypeBridge/actions/workflows/build.yml)
 [![Latest release](https://img.shields.io/github/v/release/Ryan119911/TypeBridge)](https://github.com/Ryan119911/TypeBridge/releases)
@@ -41,9 +41,9 @@ TypeBridge 让 Windows 上的输入直接进入 Ubuntu 当前窗口：键盘、�
 
 ### 双向共享（Ubuntu → Windows）
 
-- **调头就用**：在 Ubuntu 上按 `Ctrl + Alt + W`，它的键盘、鼠标、滚轮、侧键就转到 Windows，Windows 上的光标跟着动、点哪算哪。
+- **调头就用**：在 Ubuntu 上按 `Ctrl + Alt + U`，它的键盘、鼠标、滚轮、侧键就转到 Windows，Windows 上的光标跟着动、点哪算哪。
 - **两种进法**：热键随时能用；也支持把 Ubuntu 的指针推过共享边（和 Windows 那边推过来是对称的），停住半秒就过去。
-- **回来的路**：再按一次 `Ctrl + Alt + W`；或把 Windows 上的光标顶到共享边继续外推。也可以在 Windows 上按它自己的切换键（默认 `Ctrl + Alt + U`）直接收回。
+- **回来的路**：再按一次 `Ctrl + Alt + U`；或把 Windows 上的光标顶到共享边继续外推。Windows 端按的也是同一个键——坐在哪边，就把它交给另一边。
 - **不会互抢**：一边正在驱动另一边时，另一边的接管请求会被拒绝，两个方向永远只有一个生效。
 - **断了自己回来**：连接断了、心跳没了、对端没确认，Ubuntu 都会立刻放开抓取，不会把你锁在远端。
 
@@ -144,14 +144,14 @@ Ubuntu 端配置在 `~/.config/typebridge/config.json`：
   "port": 4321,
   "auto_deactivate_fcitx": false,
   "reverse_share": true,
-  "hotkey": "ctrl+alt+w",
+  "hotkey": "ctrl+alt+u",
   "edge_entry": true
 }
 ```
 
 `auto_deactivate_fcitx` 必须保持 `false`，否则拼音进不了输入法。
 
-`reverse_share` 关掉后不再注册全局热键、也不做边缘进入（托盘菜单里的接管仍可用）；`hotkey` 是反向切换键，写法与按键协议一致（`ctrl+alt+w`、`super+grave`，也可以单独用一个 `ScrollLock`）；`edge_entry` 控制"指针顶到共享边停半秒就切过去"。改完 `systemctl --user restart typebridge` 生效。
+`reverse_share` 关掉后不再注册全局热键、也不做边缘进入（托盘菜单里的接管仍可用）；`hotkey` 是反向切换键，写法与按键协议一致（`ctrl+alt+u`、`super+grave`，也可以单独用一个 `ScrollLock`）；`edge_entry` 控制"指针顶到共享边停半秒就切过去"。改完 `systemctl --user restart typebridge` 生效。
 
 </details>
 
@@ -195,11 +195,13 @@ ip=100.64.0.10, 192.168.1.20
 
 坐在 Ubuntu 前面时不用碰 Windows 的键盘：
 
-- 按 `Ctrl + Alt + W`（Ubuntu 端的全局热键，可在 `~/.config/typebridge/config.json` 里改），Windows 上的光标立刻出现，键盘输入的字符直接打进 Windows 当前窗口。
+- 按 `Ctrl + Alt + U`（Ubuntu 端的全局热键，可在 `~/.config/typebridge/config.json` 里改），Windows 上的光标立刻出现，键盘输入的字符直接打进 Windows 当前窗口。
 - 或者把指针顶到共享边停住半秒——和 Windows 那边推过来是对称的。
-- 回来：再按一次 `Ctrl + Alt + W`，或者把 Windows 上的光标顶到共享边继续外推；也可以直接在 Windows 上按 `Ctrl + Alt + U` 收回。
+- 回来：再按一次 `Ctrl + Alt + U`，或者把 Windows 上的光标顶到共享边继续外推；也可以直接在 Windows 上按 `Ctrl + Alt + U` 收回。
 
 Windows 设置页里的「双向共享」开关（ini 里的 `reverse_enable`）可以整体关掉这个方向。两边同时只有一个方向生效。
+
+> 两边默认用**同一个组合键** `Ctrl + Alt + U`：坐在哪台机器前，按一下就把键鼠交给另一台。别用 `Ctrl + Alt + W`——那是微信的全局热键，按下先弹微信。Ubuntu 端要换键，改 `~/.config/typebridge/config.json` 的 `hotkey`。
 
 ### 摆放屏幕
 

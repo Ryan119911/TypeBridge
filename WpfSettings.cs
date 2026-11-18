@@ -272,7 +272,7 @@ namespace TypeBridgeApp
             reverseSwitch.Toggled += delegate { reverseEnable = reverseSwitch.IsOn; };
             reverseBody.Children.Add(ToggleRow(reverseSwitch,
                 "允许 Ubuntu 用它的键鼠操作这台电脑",
-                "在 Ubuntu 上按 Ctrl+Alt+W（可在 Ubuntu 端配置），或把指针推出共享边就切过去；在本机按 "
+                "在 Ubuntu 上按 Ctrl+Alt+U（可在 Ubuntu 端配置），或把指针推出共享边就切过去；在本机按 "
                     + KeyboardHotkey + " 收回"));
             reverseBody.Children.Add(Note("两边不会同时生效：本机正在把键鼠送往 Ubuntu 时，Ubuntu 那边的接管请求会被拒绝"));
             stack.Children.Add(reverseCard);

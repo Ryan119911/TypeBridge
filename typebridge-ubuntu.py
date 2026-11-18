@@ -147,7 +147,9 @@ DEFAULT_CONF = {
     "xdotool_delay_ms": 5,           # ASCII 逐字间隔
     # ---- 反向共享（用本机键鼠操作 Windows）----
     "reverse_share": True,           # 关掉后不抓全局热键、也不做边缘进入
-    "hotkey": "ctrl+alt+w",          # 切换键，X11 全局热键，写法同 K 协议（ctrl+alt+w / ScrollLock）
+    # 默认和 Windows 端的切换键用同一个：坐在哪台机器前都按 Ctrl+Alt+U，
+    # 键鼠就交给另一台。别用 Ctrl+Alt+W —— 那是微信的全局热键，会被它先吃掉。
+    "hotkey": "ctrl+alt+u",
     "edge_entry": True,              # 把指针顶到共享边并停住 0.5 秒也能切过去
 }
 
@@ -1324,7 +1326,7 @@ def _attach_x_watch():
 # ---- 全局热键（XGrabKey） ----
 
 def _hotkey_parts():
-    spec = str(CONF.get("hotkey") or "ctrl+alt+w").strip()
+    spec = str(CONF.get("hotkey") or "ctrl+alt+u").strip()
     parts = [item.strip() for item in spec.split("+") if item.strip()]
     mask = 0
     base = None
