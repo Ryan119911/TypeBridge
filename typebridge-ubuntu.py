@@ -972,7 +972,7 @@ def _warp(x, y):
 def _build_keymap():
     """keycode -> 协议键名。取每个 keycode 的第一个 keysym（未加修饰的那个），
     这样 Shift 交给对端自己算，跨键盘布局的字母数字才不会错位。"""
-    if not _DPY:
+    if not _DPY or not _xcap_ready():
         return
     try:
         mn, mx = ctypes.c_int(), ctypes.c_int()
@@ -1067,6 +1067,8 @@ def _on_writable(fd, cond):
 
 
 def _send_event(line):
+    if CONF.get("debug_input"):
+        log("reverse -> %s" % line)
     return _conn_send(_RWIN.get("sock"), (line + "\n").encode("utf-8"))
 
 
@@ -1231,6 +1233,8 @@ def _on_x_key(ev, down):
         if name in _RWIN["down"]:
             return
         _RWIN["down"].add(name)
+        if CONF.get("debug_input"):
+            log("keydown %s code=%d state=%d t=%.3f" % (name, ev.code, ev.state, time.time()))
         _send_event("RK " + name + " down")
     else:
         # 进入之前就按着的键没发过 down，这里也不补 up，免得对端状态错乱

@@ -4102,6 +4102,37 @@ namespace TypeBridgeApp
             remoteEdgePush = 0;
             // 恢复边缘侦测（只在 Windows 模式下才该盯着边缘）
             mouseHook.Watching = edgeSwitch && stream != null && !mouseMode;
+            // 交还时本机光标往往还压在共享边上：真实鼠标一动就会又被边缘切走，
+            // 表现成「刚交还就自己切回 Ubuntu」。主动挪进来一点，和切回逻辑一致。
+            try
+            {
+                Rectangle b = Screen.PrimaryScreen.Bounds;
+                Point position = Cursor.Position;
+                const int gap = 40;
+                bool atEdge;
+                switch (switchEdge)
+                {
+                    case "left":
+                        atEdge = position.X <= b.Left + 1;
+                        if (atEdge) position.X = b.Left + gap;
+                        break;
+                    case "top":
+                        atEdge = position.Y <= b.Top + 1;
+                        if (atEdge) position.Y = b.Top + gap;
+                        break;
+                    case "bottom":
+                        atEdge = position.Y >= b.Bottom - 2;
+                        if (atEdge) position.Y = b.Bottom - gap;
+                        break;
+                    default:
+                        atEdge = position.X >= b.Right - 2;
+                        if (atEdge) position.X = b.Right - gap;
+                        break;
+                }
+                if (atEdge)
+                    Cursor.Position = position;
+            }
+            catch { }
             Log.Write("remote drive end: " + reason);
             try
             {
