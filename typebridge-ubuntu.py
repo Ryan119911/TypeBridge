@@ -769,7 +769,7 @@ _RWIN = {
     "entry": (0, 0),
     "win_owns": False,     # Windows 正把键鼠送到本机（OWN 1），此时不许反向接管
 }
-_HOT = {"code": 0, "mask": 0, "tried": 0.0}
+_HOT = {"code": 0, "mask": 0, "tried": 0.0, "cooldown": 0.0}
 _EDGE = {"since": 0.0, "armed": True, "px": -1, "py": -1}
 # 最近一次收到对端注入（K/M/B/W）的时间：用来分辨「本机真的有人在推」
 # 和「对端正在驱动这台机器」——后者指针也会动到边上，不能当成切换意图。
@@ -1202,6 +1202,9 @@ def _leave(reason, tell_windows=True, warp=True):
         _send_event("RGW 0")
     _ungrab()
     set_pointer_visible(True)
+    # 交还后的 0.5 秒内忽略热键：X 的自动重复/按键释放顺序会让同一次按压
+    # 再触发一次 _enter，表现就是「刚按完又自己切回去」。
+    _HOT["cooldown"] = time.time() + 0.5
     _RWIN.update(active=False, confirmed=False, sock=None, deadline=0.0)
     # 交还后先别急着允许边缘再进：指针还压在边上，否则会立刻又切走
     _EDGE["since"] = 0.0
@@ -1226,7 +1229,8 @@ def _is_hotkey(keycode, state):
 
 def _on_x_key(ev, down):
     if not _RWIN["active"]:
-        if down and _is_hotkey(ev.code, ev.state):
+        # 刚用热键交还时不要立刻又被同一次按键的重复事件接管回去
+        if down and _is_hotkey(ev.code, ev.state) and time.time() > _HOT["cooldown"]:
             _enter("热键")
         return
     name = _KEYCODE_NAME.get(ev.code)
