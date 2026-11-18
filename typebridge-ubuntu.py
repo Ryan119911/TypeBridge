@@ -1287,6 +1287,10 @@ def _on_x_motion(ev):
     dx = x - _RWIN["last_x"]
     dy = y - _RWIN["last_y"]
     _RWIN["last_x"], _RWIN["last_y"] = x, y
+    # 单帧跳几百像素必然是 warp（进入时居中 / 贴边回中）留下的位移，不是人手动作。
+    # 这种假位移会瞬间把对端光标甩到屏幕边缘并触发"边缘切回"——只对齐坐标，不转发。
+    if abs(dx) > 150 or abs(dy) > 150:
+        return
     if dx or dy:
         _RWIN["dx"] += dx
         _RWIN["dy"] += dy
@@ -1457,8 +1461,9 @@ def _rwin_tick():
         w, h = _screen_size()
         _RWIN["sw"], _RWIN["sh"] = w, h
     side = _RWIN["side"]
-    at_edge = ((side == "left" and x <= 0) or (side == "right" and x >= w - 1)
-               or (side == "top" and y <= 0) or (side == "bottom" and y >= h - 1))
+    # 允许 1px 误差：某些主题/缩放下落点停在 1 而不是 0，卡死在那里就永远进不去
+    at_edge = ((side == "left" and x <= 1) or (side == "right" and x >= w - 2)
+               or (side == "top" and y <= 1) or (side == "bottom" and y >= h - 2))
 
     # 上一个采样点用来算"推"的速度：慢慢蹭到边上不算，甩过去才算
     px, py = _EDGE["px"], _EDGE["py"]
@@ -1466,13 +1471,13 @@ def _rwin_tick():
     fast = False
     if px >= 0 and py >= 0:
         if side == "left":
-            fast = x <= 0 and px <= 30 and px - x >= 10
+            fast = x <= 1 and px <= 31 and px - x >= 10
         elif side == "right":
-            fast = x >= w - 1 and px >= w - 31 and x - px >= 10
+            fast = x >= w - 2 and px >= w - 32 and x - px >= 10
         elif side == "top":
-            fast = y <= 0 and py <= 30 and py - y >= 10
+            fast = y <= 1 and py <= 31 and py - y >= 10
         else:
-            fast = y >= h - 1 and py >= h - 31 and y - py >= 10
+            fast = y >= h - 2 and py >= h - 32 and y - py >= 10
 
     if not at_edge:
         _EDGE["since"] = 0.0

@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.7.3.0")]
+[assembly: AssemblyVersion("3.7.4.0")]
 
 namespace TypeBridgeApp
 {
@@ -3237,6 +3237,7 @@ namespace TypeBridgeApp
         private volatile bool remoteDrive;
         private bool reverseEnable = true;
         private int remoteEdgePush;
+        private DateTime remoteDriveSince;
         private DateTime lastPongUtc = DateTime.UtcNow;
 
         [DllImport("user32.dll")]
@@ -3917,7 +3918,8 @@ namespace TypeBridgeApp
             int ry;
             // 原来 right 边只给 rx=1，而切回判定是 vx < 0：鼠标往回轻移
             // 2~3px 就立刻切回，表现就是「切过去马上弹回来，像没切成功」。
-            const int margin = 12;
+            // 12px 仍然太敏感（手一抖就 13px），改成 48px：要回来得真的往回推一段。
+            const int margin = 48;
             switch (switchEdge)
             {
                 case "left":
@@ -4069,6 +4071,7 @@ namespace TypeBridgeApp
             mouseHook.RestoreCursor();
             remoteEdgePush = 0;
             remoteDrive = true;
+            remoteDriveSince = DateTime.UtcNow;
             // 接管期间关掉本机的边缘侦测：否则真实鼠标蹭到边上会再切去 Ubuntu，两边打架
             mouseHook.Watching = false;
 
@@ -4177,6 +4180,11 @@ namespace TypeBridgeApp
         {
             RemoteInput.MoveBy(dx, dy);
             if (!edgeSwitch)
+                return;
+            // 刚接管的头 400ms 不做"外推交还"判定：对端进入时会把它自己的指针挪到屏幕中心，
+            // 那次 warp 的位移偶尔会和人的动作抢顺序，算出一个几百像素的假位移，
+            // 瞬间把光标甩到边缘 → 刚切过来就切回去。给一段静默期兜住。
+            if ((DateTime.UtcNow - remoteDriveSince).TotalMilliseconds < 400)
                 return;
 
             Rectangle b = Screen.PrimaryScreen.Bounds;
