@@ -33,6 +33,7 @@ namespace TypeBridgeApp
         private HotkeyCapture activeCapture;
         private readonly Switch linkSwitch = new Switch();
         private readonly Switch edgeSwitchToggle = new Switch();
+        private readonly Switch reverseSwitch = new Switch();
         private readonly ScreenArranger arranger = new ScreenArranger();
         private readonly TextBlock errorText = new TextBlock();
         private readonly string initialEdge;
@@ -40,6 +41,7 @@ namespace TypeBridgeApp
 
         private bool linkMouse;
         private bool edgeSwitch;
+        private bool reverseEnable;
 
         [System.Runtime.InteropServices.DllImport("dwmapi.dll", PreserveSig = true)]
         private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
@@ -59,6 +61,9 @@ namespace TypeBridgeApp
         /// <summary>边缘切屏总开关，对应 ini 里的 edge_switch。</summary>
         internal bool EdgeSwitch { get { return edgeSwitch; } }
 
+        /// <summary>是否允许 Ubuntu 端反向控制本机，对应 ini 里的 reverse_enable。</summary>
+        internal bool ReverseEnable { get { return reverseEnable; } }
+
         /// <summary>只接受守护进程认识的四个方向，缺省与 BridgeApplicationContext 一致（Ubuntu 在右）。</summary>
         private static string NormalizeEdge(string value)
         {
@@ -70,7 +75,7 @@ namespace TypeBridgeApp
         internal WpfSettingsWindow(string host, int port, Hotkey keyboardHotkey, Hotkey mouseHotkey,
             bool linkMouseValue, bool edgeSwitchValue, string switchEdgeValue,
             string recvDirValue, string remoteDirValue,
-            bool firstRun, string layoutOffsetValue)
+            bool firstRun, string layoutOffsetValue, bool reverseEnableValue)
         {
             Host = host;
             Port = port;
@@ -80,6 +85,7 @@ namespace TypeBridgeApp
             RemoteDir = remoteDirValue ?? string.Empty;
             linkMouse = linkMouseValue;
             edgeSwitch = edgeSwitchValue;
+            reverseEnable = reverseEnableValue;
             initialEdge = NormalizeEdge(switchEdgeValue);
             initialOffset = layoutOffsetValue ?? string.Empty;
 
@@ -259,6 +265,17 @@ namespace TypeBridgeApp
             hotkeyBody.Children.Add(Row("鼠标快捷键", mouseCapture, 150));
             hotkeyBody.Children.Add(Note("点输入框后按下组合键，至少含 Ctrl / Alt / Shift；也可单独用 ScrollLock / Pause / Menu"));
             stack.Children.Add(hotkeyCard);
+
+            StackPanel reverseBody = new StackPanel();
+            UIElement reverseCard = Card("双向共享", reverseBody);
+            reverseSwitch.IsOn = reverseEnable;
+            reverseSwitch.Toggled += delegate { reverseEnable = reverseSwitch.IsOn; };
+            reverseBody.Children.Add(ToggleRow(reverseSwitch,
+                "允许 Ubuntu 用它的键鼠操作这台电脑",
+                "在 Ubuntu 上按 Ctrl+Alt+W（可在 Ubuntu 端配置），或把指针推出共享边就切过去；在本机按 "
+                    + keyboardHotkey + " 收回"));
+            reverseBody.Children.Add(Note("两边不会同时生效：本机正在把键鼠送往 Ubuntu 时，Ubuntu 那边的接管请求会被拒绝"));
+            stack.Children.Add(reverseCard);
 
             StackPanel layoutBody = new StackPanel();
             UIElement layoutCard = Card("屏幕排列", layoutBody);

@@ -6,6 +6,8 @@
 
 TypeBridge 让 Windows 上的输入直接进入 Ubuntu 当前窗口：键盘、鼠标、剪贴板、文件全部打通，随时用一个键在两台机器之间来回切。它只转发输入、不传画面，所以几乎不占带宽；中文由 **Ubuntu 自己的输入法**组词选字，候选窗口和词库都还是你熟悉的那一套。
 
+反过来也一样：坐在 Ubuntu 前面时按一个键（默认 `Ctrl + Alt + W`），共享就调个头，用 Ubuntu 的键鼠操作 Windows——两台机器谁都能当主机。
+
 [![Build TypeBridge](https://github.com/Ryan119911/TypeBridge/actions/workflows/build.yml/badge.svg)](https://github.com/Ryan119911/TypeBridge/actions/workflows/build.yml)
 [![Latest release](https://img.shields.io/github/v/release/Ryan119911/TypeBridge)](https://github.com/Ryan119911/TypeBridge/releases)
 
@@ -36,6 +38,14 @@ TypeBridge 让 Windows 上的输入直接进入 Ubuntu 当前窗口：键盘、�
 - **分辨率无关**：按位移转发而不是跳坐标，两端分辨率、缩放比例不同也能用。
 - **光标不碍眼**：接管期间 Windows 上的光标会隐藏（否则它会僵在屏幕中间），切回来立刻恢复并回到原位置。
 - **对端指针同步**：鼠标切回 Windows 后，Ubuntu 那边留在屏幕边上的指针也会隐藏；但如果键盘还留在 Ubuntu（只用键盘的场景），Ubuntu 的指针照常显示、照常能用。
+
+### 双向共享（Ubuntu → Windows）
+
+- **调头就用**：在 Ubuntu 上按 `Ctrl + Alt + W`，它的键盘、鼠标、滚轮、侧键就转到 Windows，Windows 上的光标跟着动、点哪算哪。
+- **两种进法**：热键随时能用；也支持把 Ubuntu 的指针推过共享边（和 Windows 那边推过来是对称的），停住半秒就过去。
+- **回来的路**：再按一次 `Ctrl + Alt + W`；或把 Windows 上的光标顶到共享边继续外推。也可以在 Windows 上按它自己的切换键（默认 `Ctrl + Alt + U`）直接收回。
+- **不会互抢**：一边正在驱动另一边时，另一边的接管请求会被拒绝，两个方向永远只有一个生效。
+- **断了自己回来**：连接断了、心跳没了、对端没确认，Ubuntu 都会立刻放开抓取，不会把你锁在远端。
 
 ### 屏幕边缘切换
 
@@ -132,11 +142,16 @@ Ubuntu 端配置在 `~/.config/typebridge/config.json`：
 ```json
 {
   "port": 4321,
-  "auto_deactivate_fcitx": false
+  "auto_deactivate_fcitx": false,
+  "reverse_share": true,
+  "hotkey": "ctrl+alt+w",
+  "edge_entry": true
 }
 ```
 
 `auto_deactivate_fcitx` 必须保持 `false`，否则拼音进不了输入法。
+
+`reverse_share` 关掉后不再注册全局热键、也不做边缘进入（托盘菜单里的接管仍可用）；`hotkey` 是反向切换键，写法与按键协议一致（`ctrl+alt+w`、`super+grave`，也可以单独用一个 `ScrollLock`）；`edge_entry` 控制"指针顶到共享边停半秒就切过去"。改完 `systemctl --user restart typebridge` 生效。
 
 </details>
 
@@ -176,6 +191,16 @@ ip=100.64.0.10, 192.168.1.20
 
 适合「鼠标留在 Windows 查资料、键盘去 Ubuntu 输入」的用法。两个快捷键都能改，但不能相同。
 
+### 反过来：用 Ubuntu 的键鼠操作 Windows
+
+坐在 Ubuntu 前面时不用碰 Windows 的键盘：
+
+- 按 `Ctrl + Alt + W`（Ubuntu 端的全局热键，可在 `~/.config/typebridge/config.json` 里改），Windows 上的光标立刻出现，键盘输入的字符直接打进 Windows 当前窗口。
+- 或者把指针顶到共享边停住半秒——和 Windows 那边推过来是对称的。
+- 回来：再按一次 `Ctrl + Alt + W`，或者把 Windows 上的光标顶到共享边继续外推；也可以直接在 Windows 上按 `Ctrl + Alt + U` 收回。
+
+Windows 设置页里的「双向共享」开关（ini 里的 `reverse_enable`）可以整体关掉这个方向。两边同时只有一个方向生效。
+
 ### 摆放屏幕
 
 打开设置 →「屏幕排列」，按住 Ubuntu 方块拖到本机的任意位置：上、下、左、右或四个斜角都能放，靠近整齐位置会自动吸附，松手生效。斜角摆放时，切屏方向按偏移更大的那个方向算（例如放在右上，从右边缘进入）。
@@ -209,6 +234,7 @@ Windows 端配置在 EXE 同目录的 `typebridge.ini`，设置窗口保存时�
 | `file_recv_port` | `4323` | Ubuntu → Windows 的文件端口 |
 | `recv_dir` | 空 | Windows 接收目录，空表示 `下载\typebridge` |
 | `remote_dir` | 空 | Ubuntu 接收目录，空表示 Ubuntu 桌面 |
+| `reverse_enable` | `1` | `1` 允许 Ubuntu 反向控制本机；`0` 一律拒绝它的接管请求 |
 | `mouse_hz` | `250` | 鼠标移动上报频率（50–1000）。手写项：改完不要再在设置里点保存 |
 
 **快捷键怎么设**：在设置里点输入框、直接按下想要的组合键即可，不需要记写法。必须带 Ctrl / Alt / Shift 之一；想用一个不会和任何软件冲突的整键，可以单独用 `ScrollLock`、`Pause` 或 `Menu`（在设置里按对应键即可）。
@@ -233,6 +259,9 @@ Windows 端使用全局键盘/鼠标钩子：只在 Ubuntu 模式下拦截并转
 - 独占全屏的游戏、走原始输入（Raw Input）的程序可能收不到转发。
 - 键盘厂商自定义的额外按键可能没有对应的 X11 键名。
 - 边缘切换只有四条边，不支持斜角摆放。
+- 反向共享用 `SendInput` 注入：Windows 上以管理员权限运行的窗口（UAC 提权）收不到这些按键和点击。
+- 反向共享时中文要用 **Windows 自己的输入法**——Ubuntu 的候选窗口在另一块屏幕上，看不见。
+- 连接是单条 TCP，反向共享要求 Ubuntu 端是 3.7 或更高版本；旧版 Ubuntu 端收到接管请求不会回应，Windows 会拒绝。
 - 文件传输是单条连接，速度由网络决定，1 GB 大约 2–3 分钟。
 - 明文协议，必须配合 Tailscale 或可信局域网 + 防火墙。
 

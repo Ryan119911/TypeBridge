@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.6.5.0")]
+[assembly: AssemblyVersion("3.7.0.0")]
 
 namespace TypeBridgeApp
 {
@@ -2022,6 +2022,306 @@ namespace TypeBridgeApp
     }
 
     /// <summary>
+    /// 反向共享的注入端：把 Ubuntu 端发来的事件变成 Windows 上的真实输入
+    /// （双向共享里"用 Ubuntu 的键鼠操作这台电脑"那一半）。
+    ///
+    /// 所有按下的键与按钮都记账：退出、被收回、或对端直接断网时统一松开，
+    /// 否则会留下"Ctrl 一直按着""左键一直按着"这类卡死状态。
+    /// </summary>
+    internal static class RemoteInput
+    {
+        private const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
+        private const uint KEYEVENTF_KEYUP = 0x0002;
+
+        private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+        private const uint MOUSEEVENTF_LEFTUP = 0x0004;
+        private const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
+        private const uint MOUSEEVENTF_RIGHTUP = 0x0010;
+        private const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020;
+        private const uint MOUSEEVENTF_MIDDLEUP = 0x0040;
+        private const uint MOUSEEVENTF_XDOWN = 0x0080;
+        private const uint MOUSEEVENTF_XUP = 0x0100;
+        private const uint MOUSEEVENTF_WHEEL = 0x0800;
+        private const uint MOUSEEVENTF_HWHEEL = 0x1000;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MOUSEINPUT
+        {
+            internal int dx;
+            internal int dy;
+            internal uint mouseData;
+            internal uint dwFlags;
+            internal uint time;
+            internal IntPtr dwExtraInfo;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct KEYBDINPUT
+        {
+            internal ushort wVk;
+            internal ushort wScan;
+            internal uint dwFlags;
+            internal uint time;
+            internal IntPtr dwExtraInfo;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct HARDWAREINPUT
+        {
+            internal uint uMsg;
+            internal ushort wParamL;
+            internal ushort wParamH;
+        }
+
+        [StructLayout(LayoutKind.Explicit)]
+        private struct INPUTUNION
+        {
+            [FieldOffset(0)] internal MOUSEINPUT mi;
+            [FieldOffset(0)] internal KEYBDINPUT ki;
+            [FieldOffset(0)] internal HARDWAREINPUT hi;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct INPUT
+        {
+            internal uint type;
+            internal INPUTUNION u;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern uint SendInput(uint count, INPUT[] inputs, int size);
+
+        /// <summary>键盘虚拟键名表。键名与 Windows → Ubuntu 方向用的是同一套词表。</summary>
+        private static readonly Dictionary<string, ushort> VirtualKeys = BuildVirtualKeys();
+
+        /// <summary>需要加 KEYEVENTF_EXTENDEDKEY 的键：方向键、编辑键区、小键盘除号与回车等。</summary>
+        private static readonly HashSet<string> ExtendedKeys = BuildExtendedKeys();
+
+        private static readonly object gate = new object();
+        private static readonly HashSet<string> downKeys = new HashSet<string>(StringComparer.Ordinal);
+        private static readonly HashSet<int> downButtons = new HashSet<int>();
+
+        private static Dictionary<string, ushort> BuildVirtualKeys()
+        {
+            Dictionary<string, ushort> map = new Dictionary<string, ushort>(StringComparer.Ordinal);
+
+            for (char c = 'a'; c <= 'z'; c++)
+            {
+                map[c.ToString()] = (ushort)(0x41 + (c - 'a'));
+                map[char.ToUpperInvariant(c).ToString()] = (ushort)(0x41 + (c - 'a'));
+            }
+            for (char c = '0'; c <= '9'; c++)
+                map[c.ToString()] = (ushort)(0x30 + (c - '0'));
+            for (int i = 1; i <= 24; i++)
+                map["F" + i.ToString()] = (ushort)(0x6F + i);
+
+            map["Return"] = 0x0D;
+            map["KP_Enter"] = 0x0D;
+            map["BackSpace"] = 0x08;
+            map["Tab"] = 0x09;
+            map["Escape"] = 0x1B;
+            map["space"] = 0x20;
+            map["Prior"] = 0x21;
+            map["Next"] = 0x22;
+            map["End"] = 0x23;
+            map["Home"] = 0x24;
+            map["Left"] = 0x25;
+            map["Up"] = 0x26;
+            map["Right"] = 0x27;
+            map["Down"] = 0x28;
+            map["PrintScreen"] = 0x2C;
+            map["Insert"] = 0x2D;
+            map["Delete"] = 0x2E;
+            map["Pause"] = 0x13;
+            map["CapsLock"] = 0x14;
+            map["NumLock"] = 0x90;
+            map["ScrollLock"] = 0x91;
+            map["Menu"] = 0x5D;
+
+            map["semicolon"] = 0xBA;
+            map["equal"] = 0xBB;
+            map["comma"] = 0xBC;
+            map["minus"] = 0xBD;
+            map["period"] = 0xBE;
+            map["slash"] = 0xBF;
+            map["grave"] = 0xC0;
+            map["bracketleft"] = 0xDB;
+            map["backslash"] = 0xDC;
+            map["bracketright"] = 0xDD;
+            map["apostrophe"] = 0xDE;
+
+            map["ctrl"] = 0xA2;    // VK_LCONTROL
+            map["shift"] = 0xA0;   // VK_LSHIFT
+            map["alt"] = 0xA4;     // VK_LMENU
+            map["super"] = 0x5B;   // VK_LWIN
+
+            map["KP_0"] = 0x60;
+            map["KP_1"] = 0x61;
+            map["KP_2"] = 0x62;
+            map["KP_3"] = 0x63;
+            map["KP_4"] = 0x64;
+            map["KP_5"] = 0x65;
+            map["KP_6"] = 0x66;
+            map["KP_7"] = 0x67;
+            map["KP_8"] = 0x68;
+            map["KP_9"] = 0x69;
+            map["KP_Multiply"] = 0x6A;
+            map["KP_Add"] = 0x6B;
+            map["KP_Separator"] = 0x6C;
+            map["KP_Subtract"] = 0x6D;
+            map["KP_Decimal"] = 0x6E;
+            map["KP_Divide"] = 0x6F;
+
+            map["VolumeMute"] = 0xAD;
+            map["VolumeDown"] = 0xAE;
+            map["VolumeUp"] = 0xAF;
+            map["MediaNextTrack"] = 0xB0;
+            map["MediaPrevTrack"] = 0xB1;
+            map["MediaStop"] = 0xB2;
+            map["MediaPlayPause"] = 0xB3;
+            return map;
+        }
+
+        private static HashSet<string> BuildExtendedKeys()
+        {
+            HashSet<string> set = new HashSet<string>(StringComparer.Ordinal)
+            {
+                "Left", "Right", "Up", "Down", "Prior", "Next", "Home", "End",
+                "Insert", "Delete", "NumLock", "PrintScreen", "Menu",
+                "KP_Enter", "KP_Divide", "super",
+                "VolumeMute", "VolumeDown", "VolumeUp",
+                "MediaNextTrack", "MediaPrevTrack", "MediaStop", "MediaPlayPause"
+            };
+            return set;
+        }
+
+        internal static void Key(string name, bool down)
+        {
+            ushort vk;
+            if (string.IsNullOrEmpty(name) || !VirtualKeys.TryGetValue(name, out vk))
+                return;
+            lock (gate)
+            {
+                // 对端可能连发 press（自动重复），这里去重，只把状态变化送进系统
+                bool changed = down ? downKeys.Add(name) : downKeys.Remove(name);
+                if (!changed)
+                    return;
+                SendKey(vk, ExtendedKeys.Contains(name), down);
+            }
+        }
+
+        /// <summary>按相对位移移动本机指针。用 SetCursorPos 而不是注入 WM_MOUSEMOVE，
+        /// 这样不受"提高指针精确度"的加速曲线影响，两台机器的移动距离是 1:1 的。</summary>
+        internal static void MoveBy(int dx, int dy)
+        {
+            if (dx == 0 && dy == 0)
+                return;
+            Point current = Cursor.Position;
+            int x = current.X + dx;
+            int y = current.Y + dy;
+            Rectangle screen = SystemInformation.VirtualScreen;
+            if (x < screen.Left) x = screen.Left;
+            if (x > screen.Right - 1) x = screen.Right - 1;
+            if (y < screen.Top) y = screen.Top;
+            if (y > screen.Bottom - 1) y = screen.Bottom - 1;
+            try { Cursor.Position = new Point(x, y); }
+            catch { }
+        }
+
+        internal static void Button(int button, bool down)
+        {
+            uint flag;
+            uint data = 0;
+            switch (button)
+            {
+                case 1: flag = down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP; break;
+                case 2: flag = down ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP; break;
+                case 3: flag = down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP; break;
+                case 8: flag = down ? MOUSEEVENTF_XDOWN : MOUSEEVENTF_XUP; data = 1; break;
+                case 9: flag = down ? MOUSEEVENTF_XDOWN : MOUSEEVENTF_XUP; data = 2; break;
+                default: return;
+            }
+            lock (gate)
+            {
+                bool changed = down ? downButtons.Add(button) : downButtons.Remove(button);
+                if (!changed)
+                    return;
+                SendMouse(0, 0, data, flag);
+            }
+        }
+
+        internal static void Wheel(string direction)
+        {
+            switch ((direction ?? string.Empty).Trim().ToLowerInvariant())
+            {
+                case "up": SendMouse(0, 0, 120, MOUSEEVENTF_WHEEL); break;
+                case "down": SendMouse(0, 0, unchecked((uint)(-120)), MOUSEEVENTF_WHEEL); break;
+                case "right": SendMouse(0, 0, 120, MOUSEEVENTF_HWHEEL); break;
+                case "left": SendMouse(0, 0, unchecked((uint)(-120)), MOUSEEVENTF_HWHEEL); break;
+                default: return;
+            }
+        }
+
+        /// <summary>松开所有注入过的键与按钮。退出、被收回、断线时都要调用。</summary>
+        internal static void ReleaseAll()
+        {
+            lock (gate)
+            {
+                foreach (string name in new List<string>(downKeys))
+                {
+                    ushort vk;
+                    if (VirtualKeys.TryGetValue(name, out vk))
+                        SendKey(vk, ExtendedKeys.Contains(name), false);
+                }
+                downKeys.Clear();
+
+                foreach (int button in new List<int>(downButtons))
+                {
+                    uint flag;
+                    uint data = 0;
+                    switch (button)
+                    {
+                        case 1: flag = MOUSEEVENTF_LEFTUP; break;
+                        case 2: flag = MOUSEEVENTF_MIDDLEUP; break;
+                        case 3: flag = MOUSEEVENTF_RIGHTUP; break;
+                        case 8: flag = MOUSEEVENTF_XUP; data = 1; break;
+                        case 9: flag = MOUSEEVENTF_XUP; data = 2; break;
+                        default: continue;
+                    }
+                    SendMouse(0, 0, data, flag);
+                }
+                downButtons.Clear();
+            }
+        }
+
+        private static void SendKey(ushort vk, bool extended, bool down)
+        {
+            INPUT input = new INPUT();
+            input.type = 1;   // INPUT_KEYBOARD
+            input.u.ki.wVk = vk;
+            input.u.ki.wScan = 0;
+            input.u.ki.dwFlags = (extended ? KEYEVENTF_EXTENDEDKEY : 0u)
+                | (down ? 0u : KEYEVENTF_KEYUP);
+            input.u.ki.time = 0;
+            input.u.ki.dwExtraInfo = IntPtr.Zero;
+            SendInput(1, new INPUT[] { input }, Marshal.SizeOf(typeof(INPUT)));
+        }
+
+        private static void SendMouse(int dx, int dy, uint data, uint flags)
+        {
+            INPUT input = new INPUT();
+            input.type = 0;   // INPUT_MOUSE
+            input.u.mi.dx = dx;
+            input.u.mi.dy = dy;
+            input.u.mi.mouseData = data;
+            input.u.mi.dwFlags = flags;
+            input.u.mi.time = 0;
+            input.u.mi.dwExtraInfo = IntPtr.Zero;
+            SendInput(1, new INPUT[] { input }, Marshal.SizeOf(typeof(INPUT)));
+        }
+    }
+
+    /// <summary>
     /// 屏幕排列控件：中间是本机，点击上下左右把 Ubuntu 摆到那一侧，
     /// 直观对应"第二台显示器放在哪边"。
     /// </summary>
@@ -2932,6 +3232,11 @@ namespace TypeBridgeApp
         private int remoteHeight = 1080;
         private bool keyboardMode;
         private bool mouseMode;
+        // 反向共享：Ubuntu 用它的键鼠操作本机。读取线程直接注入（延迟最低），
+        // 托盘文案等界面动作再切回 UI 线程。
+        private volatile bool remoteDrive;
+        private bool reverseEnable = true;
+        private int remoteEdgePush;
         private DateTime lastPongUtc = DateTime.UtcNow;
 
         [DllImport("user32.dll")]
@@ -3217,6 +3522,8 @@ namespace TypeBridgeApp
                         recvDir = value.Trim();
                     if (key == "remote_dir")
                         remoteDir = value.Trim();
+                    if (key == "reverse_enable")
+                        reverseEnable = ParseBool(value, reverseEnable);
                 }
             }
             catch
@@ -3245,6 +3552,8 @@ namespace TypeBridgeApp
         {
             if (settingsOpen)
                 return;
+            // 设置窗口要用本机键盘，先把反向接管收回来（对端会跟着放开抓取）
+            EndRemoteDrive("打开设置", true);
             settingsOpen = true;
 
             if (System.Windows.Application.Current == null)
@@ -3271,7 +3580,7 @@ namespace TypeBridgeApp
             {
                 WpfSettingsWindow form = new WpfSettingsWindow(
                     ip, port, keyboardHotkey, mouseHotkey, linkMouse, edgeSwitch, switchEdge,
-                    recvDir, remoteDir, firstRun, layoutOffset);
+                    recvDir, remoteDir, firstRun, layoutOffset, reverseEnable);
                 {
                     if (form.ShowDialog() != true)
                         return;
@@ -3287,6 +3596,7 @@ namespace TypeBridgeApp
                     layoutOffset = form.LayoutOffset;
                     recvDir = form.RecvDir ?? string.Empty;
                     remoteDir = form.RemoteDir ?? string.Empty;
+                    reverseEnable = form.ReverseEnable;
                     mouseHook.SwitchEdge = switchEdge;
 
                     if (!SaveConfiguration())
@@ -3344,6 +3654,7 @@ namespace TypeBridgeApp
                         "file_recv_port=" + fileRecvPort.ToString(),
                         "recv_dir=" + recvDir,
                         "remote_dir=" + remoteDir,
+                        "reverse_enable=" + (reverseEnable ? "1" : "0"),
                         "mouse_hz=" + mouseHz
                     },
                     new UTF8Encoding(false));
@@ -3362,6 +3673,15 @@ namespace TypeBridgeApp
 
         private void ToggleKeyboardMode()
         {
+            if (remoteDrive)
+            {
+                // 正在被 Ubuntu 驱动时，按本机热键的含义是"收回"，不是"送过去"：
+                // 否则会把本机按键转给对端，和正在注入的事件缠在一起。
+                EndRemoteDrive("本机热键收回", true);
+                Log.Write("toggle: take back from ubuntu");
+                ShowTrayTip("已收回控制", "键盘鼠标已回到 Windows");
+                return;
+            }
             // 同一次按键可能被 RegisterHotKey 与低级钩子各识别一次（叠加其它全局钩子时
             // 顺序不确定），两次 toggle 会互相抵消，表现就是"按了没反应"。留个窗口去重。
             DateTime now = DateTime.UtcNow;
@@ -3401,6 +3721,13 @@ namespace TypeBridgeApp
 
         private void ToggleMouseMode()
         {
+            if (remoteDrive)
+            {
+                EndRemoteDrive("本机热键收回", true);
+                Log.Write("mouse toggle: take back from ubuntu");
+                ShowTrayTip("已收回控制", "键盘鼠标已回到 Windows");
+                return;
+            }
             if (linkMouse)
                 return;
             DateTime now = DateTime.UtcNow;
@@ -3474,7 +3801,10 @@ namespace TypeBridgeApp
         {
             if (stream == null)
                 return;
-            SendLine("CUR " + ((!mouseMode && !keyboardMode) ? "0" : "1"));
+            bool owning = mouseMode || keyboardMode;
+            SendLine("CUR " + (owning ? "1" : "0"));
+            // 同时告诉对端"本机正在驱动你"：它据此拒绝反向接管，避免两边互抢成环
+            SendLine("OWN " + (owning ? "1" : "0"));
         }
 
         private void UpdateStatus()
@@ -3486,6 +3816,14 @@ namespace TypeBridgeApp
 
             string latency = stream != null && lastRttMs > 0
                 ? "，" + lastRttMs.ToString("0") + "ms" : string.Empty;
+
+            if (remoteDrive)
+            {
+                tray.Text = "TypeBridge ← Ubuntu（Ubuntu 正在控制本机" + latency + "）";
+                toggleItem.Text = "收回键盘鼠标\t" + keyboardHotkey;
+                mouseToggleItem.Visible = false;
+                return;
+            }
 
             if (linkMouse)
             {
@@ -3569,7 +3907,8 @@ namespace TypeBridgeApp
 
         private void OnEdgeEntered()
         {
-            if (!edgeSwitch || mouseMode || stream == null)
+            // 反向接管期间本机鼠标只做"收回"这一件事，不能再从边缘切出去
+            if (!edgeSwitch || mouseMode || remoteDrive || stream == null)
                 return;
 
             Rectangle b = Screen.PrimaryScreen.Bounds;
@@ -3649,6 +3988,223 @@ namespace TypeBridgeApp
             Log.Write("enter remote: " + reason);
             if (switchToast)
                 ShowTrayTip("TypeBridge", reason + " → Ubuntu");
+        }
+
+        // ---------- 反向共享：Ubuntu 驱动本机 ----------
+
+        /// <summary>
+        /// 本机相对 Ubuntu 的方位。switch_edge 记的是「Ubuntu 在本机的哪一侧」，
+        /// 反过来就是本机在 Ubuntu 的哪一侧，也是它推指针过来的那条边。
+        /// </summary>
+        private string UbuntuRelativeSide()
+        {
+            switch (switchEdge)
+            {
+                case "left": return "right";
+                case "top": return "bottom";
+                case "bottom": return "top";
+                default: return "left";
+            }
+        }
+
+        /// <summary>
+        /// Ubuntu 端按了它的切换键（或把指针推出了共享边），请求接管这台机器的键鼠。
+        /// 先回 ok 再放开注入：对端要等到 ok 才把本机输入真正送过来，两边的状态不会错位。
+        /// </summary>
+        private void BeginRemoteDrive(int yNorm)
+        {
+            if (!reverseEnable)
+            {
+                SendLine("RGW no disabled");
+                Log.Write("remote drive denied: disabled in settings");
+                return;
+            }
+            if (keyboardMode || mouseMode)
+            {
+                // 本机正把键鼠送给 Ubuntu，再反过来接管就成了环路
+                SendLine("RGW no busy");
+                Log.Write("remote drive denied: this machine is driving ubuntu");
+                return;
+            }
+            if (settingsOpen)
+            {
+                SendLine("RGW no busy");
+                Log.Write("remote drive denied: settings open");
+                return;
+            }
+            if (remoteDrive)
+                return;
+
+            if (yNorm < 0) yNorm = 0;
+            if (yNorm > 65535) yNorm = 65535;
+
+            // 指针落到共享边上：Ubuntu 那边指针消失的位置，和这里出现的位置对得上
+            Rectangle b = Screen.PrimaryScreen.Bounds;
+            int x;
+            int y;
+            switch (switchEdge)
+            {
+                case "left":
+                    x = b.Left + 2;
+                    y = MapRange(yNorm, 65535, b.Height, b.Top);
+                    break;
+                case "top":
+                    y = b.Top + 2;
+                    x = MapRange(yNorm, 65535, b.Width, b.Left);
+                    break;
+                case "bottom":
+                    y = b.Bottom - 3;
+                    x = MapRange(yNorm, 65535, b.Width, b.Left);
+                    break;
+                default:
+                    x = b.Right - 3;
+                    y = MapRange(yNorm, 65535, b.Height, b.Top);
+                    break;
+            }
+            try { Cursor.Position = new Point(x, y); }
+            catch { }
+
+            RemoteInput.ReleaseAll();
+            remoteEdgePush = 0;
+            remoteDrive = true;
+            // 接管期间关掉本机的边缘侦测：否则真实鼠标蹭到边上会再切去 Ubuntu，两边打架
+            mouseHook.Watching = false;
+            SendLine("RGW ok");
+            Log.Write("remote drive start (edge=" + switchEdge + ", y=" + yNorm + ")");
+
+            try
+            {
+                hotkeyForm.BeginInvoke(new Action(delegate
+                {
+                    mouseHook.ReleaseAll();
+                    mouseHook.RestoreCursor();
+                    UpdateStatus();
+                    ShowTrayTip("TypeBridge", "Ubuntu 正在控制这台电脑，按 " + keyboardHotkey + " 收回");
+                }));
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// 结束反向接管。tellUbuntu=true 表示是本机主动收回（热键 / 打开设置 / 边缘切回），
+        /// 要通知对端把它的输入抓取放开；对端主动交还时不能回这条，否则两边来回踢。
+        /// </summary>
+        private void EndRemoteDrive(string reason, bool tellUbuntu)
+        {
+            bool wasActive = remoteDrive;
+            remoteDrive = false;
+            RemoteInput.ReleaseAll();
+            if (!wasActive)
+                return;
+
+            if (tellUbuntu && stream != null)
+                SendLine("RGW 0");
+            remoteEdgePush = 0;
+            // 恢复边缘侦测（只在 Windows 模式下才该盯着边缘）
+            mouseHook.Watching = edgeSwitch && stream != null && !mouseMode;
+            Log.Write("remote drive end: " + reason);
+            try
+            {
+                hotkeyForm.BeginInvoke(new Action(delegate { UpdateStatus(); }));
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// 反向接管期间的鼠标位移。除了移动指针对，还要盯着"顶到共享边还继续外推"——
+        /// 那是在示意把控制权交回 Ubuntu，和 Windows → Ubuntu 方向的边缘切屏对称。
+        /// </summary>
+        private void OnRemoteMouseMove(int dx, int dy)
+        {
+            RemoteInput.MoveBy(dx, dy);
+            if (!edgeSwitch)
+                return;
+
+            Rectangle b = Screen.PrimaryScreen.Bounds;
+            Point p = Cursor.Position;
+            bool pushing;
+            switch (switchEdge)
+            {
+                case "left":
+                    pushing = p.X <= b.Left && dx < 0;
+                    break;
+                case "top":
+                    pushing = p.Y <= b.Top && dy < 0;
+                    break;
+                case "bottom":
+                    pushing = p.Y >= b.Bottom - 1 && dy > 0;
+                    break;
+                default:
+                    pushing = p.X >= b.Right - 1 && dx > 0;
+                    break;
+            }
+            if (!pushing)
+            {
+                remoteEdgePush = 0;
+                return;
+            }
+            remoteEdgePush += Math.Max(Math.Abs(dx), Math.Abs(dy));
+            if (remoteEdgePush < 90)
+                return;
+            remoteEdgePush = 0;
+            ReturnToUbuntuByEdge();
+        }
+
+        /// <summary>把控制权交回 Ubuntu，并把它的指针放到共享边内侧，接着就能继续用。</summary>
+        private void ReturnToUbuntuByEdge()
+        {
+            if (!remoteDrive)
+                return;
+
+            Rectangle b = Screen.PrimaryScreen.Bounds;
+            Point p = Cursor.Position;
+            const int gap = 40;
+            int ux;
+            int uy;
+            switch (switchEdge)
+            {
+                case "left":
+                    ux = remoteWidth - gap;
+                    uy = MapRange(p.Y - b.Top, b.Height, remoteHeight, 0);
+                    break;
+                case "top":
+                    ux = MapRange(p.X - b.Left, b.Width, remoteWidth, 0);
+                    uy = remoteHeight - gap;
+                    break;
+                case "bottom":
+                    ux = MapRange(p.X - b.Left, b.Width, remoteWidth, 0);
+                    uy = gap;
+                    break;
+                default:
+                    ux = gap;
+                    uy = MapRange(p.Y - b.Top, b.Height, remoteHeight, 0);
+                    break;
+            }
+            SendLine("RP " + ux.ToString() + " " + uy.ToString());
+            EndRemoteDrive("边缘切回", true);
+            // 本机光标也挪离边缘：否则下一次真实鼠标轻微一动就又判定为外推
+            try
+            {
+                Point local = Cursor.Position;
+                switch (switchEdge)
+                {
+                    case "left": local.X = b.Left + gap; break;
+                    case "top": local.Y = b.Top + gap; break;
+                    case "bottom": local.Y = b.Bottom - gap; break;
+                    default: local.X = b.Right - gap; break;
+                }
+                Cursor.Position = local;
+            }
+            catch { }
+            try
+            {
+                hotkeyForm.BeginInvoke(new Action(delegate
+                {
+                    if (switchToast)
+                        ShowTrayTip("TypeBridge", "已交回 Ubuntu");
+                }));
+            }
+            catch { }
         }
 
         // ---------- 剪贴板 ----------
@@ -3900,6 +4456,11 @@ namespace TypeBridgeApp
             SendLine("DIR " + (remoteDir ?? string.Empty).Trim());
             // 上一次可能把对端指针藏起来了，重连先把可见性恢复
             SendLine("CUR 1");
+            // 新连接先声明"本机没有在驱动对端"，对端据此决定能不能反向接管
+            SendLine("OWN 0");
+            // 反向共享用的信息：本机屏幕尺寸 + 本机在 Ubuntu 的哪一侧（决定它从哪条边推过来）
+            SendLine("SW " + Screen.PrimaryScreen.Bounds.Width + " "
+                + Screen.PrimaryScreen.Bounds.Height + " " + UbuntuRelativeSide());
             readerThread = new System.Threading.Thread(delegate () { ReadLoop(target); });
             readerThread.IsBackground = true;
             readerThread.Start();
@@ -3985,6 +4546,54 @@ namespace TypeBridgeApp
                     mouseHook.RemoteWidth = width;
                     mouseHook.RemoteHeight = height;
                 }
+                return;
+            }
+
+            // ---------- 反向共享：Ubuntu 的键鼠操作本机 ----------
+            // 注入直接在本线程做（少一次界面线程排队，输入延迟更低）；
+            // 只有托盘文案、提示浮层才切回 UI 线程。
+            string[] fields = line.Split(' ');
+            if (fields[0] == "RGW")
+            {
+                string action = fields.Length > 1 ? fields[1] : string.Empty;
+                if (action == "1")
+                {
+                    int yNorm = 32768;
+                    if (fields.Length > 2)
+                        int.TryParse(fields[2], out yNorm);
+                    BeginRemoteDrive(yNorm);
+                }
+                else if (action == "0")
+                {
+                    EndRemoteDrive("Ubuntu 交还控制", false);
+                }
+                return;
+            }
+            if (fields[0] == "RK" && fields.Length >= 3)
+            {
+                if (remoteDrive)
+                    RemoteInput.Key(fields[1], fields[2] == "down");
+                return;
+            }
+            if (fields[0] == "RM" && fields.Length >= 3)
+            {
+                int dx;
+                int dy;
+                if (remoteDrive && int.TryParse(fields[1], out dx) && int.TryParse(fields[2], out dy))
+                    OnRemoteMouseMove(dx, dy);
+                return;
+            }
+            if (fields[0] == "RB" && fields.Length >= 3)
+            {
+                int button;
+                if (remoteDrive && int.TryParse(fields[1], out button))
+                    RemoteInput.Button(button, fields[2] == "down");
+                return;
+            }
+            if (fields[0] == "RW" && fields.Length >= 2)
+            {
+                if (remoteDrive)
+                    RemoteInput.Wheel(fields[1]);
                 return;
             }
 
@@ -4962,7 +5571,7 @@ namespace TypeBridgeApp
                 // 而链路恢复前重连要十几秒，期间 Watching=false、边缘切屏完全没反应，
                 // 表现就是「推两下没成功，隔一阵才切过去」。
                 // 链路真死时 SenderLoop 的 WriteTimeout(4s) 会走 NotifyConnectionLost 兜底。
-                bool activeMode = keyboardMode || mouseMode;
+                bool activeMode = keyboardMode || mouseMode || remoteDrive;
                 double limitSeconds = activeMode ? 3 : 8;
                 double silentSeconds = (DateTime.UtcNow - lastPongUtc).TotalSeconds;
                 if (silentSeconds > limitSeconds)
@@ -4972,7 +5581,15 @@ namespace TypeBridgeApp
                         + activeMode + ")");
                     if (activeMode)
                     {
-                        ShowTrayTip("已切回本机", "没收到 Ubuntu 回应，先把键盘鼠标还给你");
+                        if (remoteDrive)
+                        {
+                            ShowTrayTip("已收回控制", "和 Ubuntu 的连接断了，键盘鼠标回到本机");
+                            EndRemoteDrive("连接超时", false);
+                        }
+                        else
+                        {
+                            ShowTrayTip("已切回本机", "没收到 Ubuntu 回应，先把键盘鼠标还给你");
+                        }
                         SetKeyboardMode(false, false);
                         SetMouseMode(false, false);
                     }
@@ -4986,6 +5603,9 @@ namespace TypeBridgeApp
 
         private void CloseConnection()
         {
+            // 反向接管中把键放掉：否则 Ubuntu 一断网，本机就卡在"Ctrl 一直按着"
+            remoteDrive = false;
+            RemoteInput.ReleaseAll();
             // 先补发鼠标 up，再断开，避免 Ubuntu 端卡在拖拽状态
             mouseHook.ReleaseAll();
             StopReader();
