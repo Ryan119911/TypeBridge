@@ -619,7 +619,7 @@ def _apply_hide(lib):
     if not _pointer_hidden["value"]:
         lib.XFixesHideCursor(_DPY, root)
         _pointer_hidden["value"] = True
-        log("cursor: 隐藏（控制已交还 Windows）")
+        log("cursor: 隐藏（反向接管中）")
         _pointer_hidden["timer"] = GLib.timeout_add_seconds(
             POINTER_HIDE_TIMEOUT, _pointer_timeout)
     return False
@@ -2001,8 +2001,12 @@ def handle_line(line, sock):
             pass
         return True
     if line.startswith("CUR "):
-        # Windows 说：这台 Ubuntu 的指针该不该显示
-        set_pointer_visible(line[4:].strip() != "0")
+        # Windows 说：这台 Ubuntu 的指针该不该显示。
+        # 3.7.3 起不再因为「控制权在 Windows」就把本机指针长期藏起来：
+        # 人走到 Ubuntu 前面时鼠标是隐形的，桌面根本没法用（实测踩到）。
+        # 只有在反向接管期间（我们自己抓取键鼠）才允许隐藏。
+        if not _RWIN["active"]:
+            set_pointer_visible(True, force=True)
         return True
     if line.startswith("OWN "):
         # Windows 说：它是不是正在把键鼠送到这台机器。是的话不能反向接管，否则成环路
