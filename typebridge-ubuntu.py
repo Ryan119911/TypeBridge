@@ -770,7 +770,8 @@ _RWIN = {
     "win_owns": False,     # Windows 正把键鼠送到本机（OWN 1），此时不许反向接管
 }
 _HOT = {"code": 0, "mask": 0, "tried": 0.0, "cooldown": 0.0}
-_EDGE = {"since": 0.0, "armed": True, "px": -1, "py": -1}
+_EDGE = {"since": 0.0, "armed": True, "px": -1, "py": -1, "cooldown": 0.0}
+_LOCAL_MOVE = {"hits": 0}
 # 最近一次收到对端注入（K/M/B/W）的时间：用来分辨「本机真的有人在推」
 # 和「对端正在驱动这台机器」——后者指针也会动到边上，不能当成切换意图。
 LAST_INPUT_IN = {"t": 0.0}
@@ -1122,7 +1123,7 @@ def _enter(reason, y_norm=None):
         return
     # 对端正驱动这台机器时，它的注入也会产生按键/位移。只有注入停下来一小会儿，
     # 才认为这次是本地有人真的在操作——否则就会两边来回抢（注入的热键触发接管）。
-    if _RWIN["win_owns"] and time.time() - LAST_INPUT_IN["t"] < 0.35:
+    if _RWIN["win_owns"] and time.time() - LAST_INPUT_IN["t"] < 0.25:
         log("reverse share: 忽略进入（对端正驱动本机且刚有注入）")
         return
     sock = _peer_sock()
@@ -1209,6 +1210,10 @@ def _leave(reason, tell_windows=True, warp=True):
     # 交还后先别急着允许边缘再进：指针还压在边上，否则会立刻又切走
     _EDGE["since"] = 0.0
     _EDGE["armed"] = False
+    # 交还后 1.2 秒内不再判定任何进入：指针刚被摆回边界内侧，
+    # 这段时间的位移/跳变都可能被误当成"又推了一次"。
+    _EDGE["cooldown"] = time.time() + 1.2
+    _LOCAL_MOVE["hits"] = 0
     if warp:
         _warp_inside()
     log("reverse share: 交还本机（%s）" % reason)
@@ -1293,7 +1298,7 @@ def _on_x_motion(ev):
     _RWIN["last_x"], _RWIN["last_y"] = x, y
     # 单帧跳几百像素必然是 warp（进入时居中 / 贴边回中）留下的位移，不是人手动作。
     # 这种假位移会瞬间把对端光标甩到屏幕边缘并触发"边缘切回"——只对齐坐标，不转发。
-    if abs(dx) > 150 or abs(dy) > 150:
+    if abs(dx) > 80 or abs(dy) > 80:
         return
     if dx or dy:
         _RWIN["dx"] += dx
@@ -1446,32 +1451,51 @@ def _rwin_tick():
 
     if not CONNS or not _RWIN["side"] or not CONF.get("edge_entry", True):
         _EDGE["since"] = 0.0
+        _LOCAL_MOVE["hits"] = 0
         return True
 
     now = time.time()
-    # 对端正在往这台机器注入输入（它正驱动本机）：此时指针也会被推到边上，
-    # 那不是"有人在本机推鼠标"。只有注入停下来一小会儿，才认为是本地人手在动。
-    idle = now - LAST_INPUT_IN["t"]
-    if _RWIN["win_owns"] and idle < 0.35:
+    if now < _EDGE["cooldown"]:
         _EDGE["since"] = 0.0
+        _LOCAL_MOVE["hits"] = 0
         return True
 
     pos = _query_pointer()
     if pos is None:
         return True
     x, y, _mask = pos
+    px, py = _EDGE["px"], _EDGE["py"]
+    _EDGE["px"], _EDGE["py"] = x, y
+    idle = now - LAST_INPUT_IN["t"]
     w, h = _RWIN["sw"], _RWIN["sh"]
     if not w or not h:
         w, h = _screen_size()
         _RWIN["sw"], _RWIN["sh"] = w, h
     side = _RWIN["side"]
+    moved = px >= 0 and abs(x - px) + abs(y - py) >= 3
+
+    # 对端正驱动本机：不能用"推边缘"抢回来——对端的指针经常就停在共享边上，
+    # 一停就会把控制权抢回来，表现成「刚切到 Ubuntu，碰到左边就弹回去」。
+    # 改成看连续的本机鼠标活动：对端没在动（没有注入）而指针连续几拍都在动，
+    # 那只能是有人在本机搬鼠标，这时候接管才符合直觉。
+    # 单次的 warp 跳变只会命中一拍，不会误判。
+    if _RWIN["win_owns"]:
+        if idle > 0.30 and moved:
+            _LOCAL_MOVE["hits"] += 1
+        else:
+            _LOCAL_MOVE["hits"] = 0
+        if _LOCAL_MOVE["hits"] >= 3:
+            _LOCAL_MOVE["hits"] = 0
+            _enter("本机鼠标活动")
+        _EDGE["since"] = 0.0
+        return True
+
+    _LOCAL_MOVE["hits"] = 0
+
     # 允许 1px 误差：某些主题/缩放下落点停在 1 而不是 0，卡死在那里就永远进不去
     at_edge = ((side == "left" and x <= 1) or (side == "right" and x >= w - 2)
                or (side == "top" and y <= 1) or (side == "bottom" and y >= h - 2))
 
-    # 上一个采样点用来算"推"的速度：慢慢蹭到边上不算，甩过去才算
-    px, py = _EDGE["px"], _EDGE["py"]
-    _EDGE["px"], _EDGE["py"] = x, y
     fast = False
     if px >= 0 and py >= 0:
         if side == "left":
@@ -1492,7 +1516,7 @@ def _rwin_tick():
         return True
     if not _EDGE["since"]:
         _EDGE["since"] = now
-    # 甩过去：立刻切，手感跟 Windows 那边推边缘一致；停在边上不动：等 350ms 兜底
+    # 位置判定：光标停在共享边上就算数（甩过去立刻切，慢慢蹭到边停 0.35 秒也切）
     if fast or now - _EDGE["since"] >= 0.35:
         _EDGE["armed"] = False
         _enter("边缘进入" if fast else "边缘停留")

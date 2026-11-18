@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.7.4.0")]
+[assembly: AssemblyVersion("3.7.5.0")]
 
 namespace TypeBridgeApp
 {
@@ -1758,15 +1758,14 @@ namespace TypeBridgeApp
                             {
                                 virtualX += dx;
                                 virtualY += dy;
-                                // 只有「和 Windows 相接的那条边」越界才切回；其他三条边只是屏幕边界
+                                // 位置判定：光标推到「和 Windows 相接的那条边」就切回，
+                                // 和 Windows 自己的多屏切换一致——不要求推得快，推到边上就算。
                                 if (ShouldReturnToWindows(switchEdge, virtualX, virtualY, remoteWidth, remoteHeight))
                                 {
                                     tracking = false;
                                     pendingDx = 0;
                                     pendingDy = 0;
                                     // 先撤掉武装：光标回到屏幕内部才重新 armed。
-                                    // 时间冷却只留很短一段兜底，主要靠 armed 机制，
-                                    // 否则「切回后想马上再切过去」会被硬等一秒多。
                                     edgeArmed = false;
                                     edgeCooldownUntil = unchecked(Environment.TickCount + 300);
                                     Log.Write("edge return (vx=" + virtualX + " vy=" + virtualY + ")");
@@ -1855,13 +1854,10 @@ namespace TypeBridgeApp
         }
 
         /// <summary>
-        /// 光标是否贴在「切屏边」上并持续往外推。
-        /// 指针被系统夹在屏幕边上时仍会持续产生移动事件，所以连续三次贴边才判定切屏，
-        /// 避免只是滑到边上就误切。
-        /// </summary>
         /// <summary>
         /// 虚拟坐标是否已经越过「和 Windows 相接的那条边」。
         /// left 表示 Ubuntu 在左，交界是 Ubuntu 的右边缘；以此类推。
+        /// 这是位置判定：推到边上就切，不看推的速度。
         /// </summary>
         internal static bool ShouldReturnToWindows(string edge, int vx, int vy, int width, int height)
         {
@@ -4210,7 +4206,15 @@ namespace TypeBridgeApp
                 remoteEdgePush = 0;
                 return;
             }
-            remoteEdgePush += Math.Max(Math.Abs(dx), Math.Abs(dy));
+            int step = Math.Max(Math.Abs(dx), Math.Abs(dy));
+            // 单帧几十像素的跳变只可能来自 warp（对端进入时把指针居中），
+            // 不是人手在推；直接丢弃并清零，否则一次跳变就能凑满阈值、刚接管就切回。
+            if (step > 60)
+            {
+                remoteEdgePush = 0;
+                return;
+            }
+            remoteEdgePush += step;
             if (remoteEdgePush < 90)
                 return;
             remoteEdgePush = 0;
