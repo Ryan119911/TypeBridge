@@ -770,7 +770,10 @@ _RWIN = {
     "win_owns": False,     # Windows 正把键鼠送到本机（OWN 1），此时不许反向接管
 }
 _HOT = {"code": 0, "mask": 0, "tried": 0.0}
-_EDGE = {"since": 0.0, "armed": True}
+_EDGE = {"since": 0.0, "armed": True, "px": -1, "py": -1}
+# 最近一次收到对端注入（K/M/B/W）的时间：用来分辨「本机真的有人在推」
+# 和「对端正在驱动这台机器」——后者指针也会动到边上，不能当成切换意图。
+LAST_INPUT_IN = {"t": 0.0}
 LAST_RX = {"t": time.time()}
 _KEYCODE_NAME = {}
 _XCAP_READY = {"done": False}
@@ -1117,9 +1120,10 @@ def _warp_inside():
 def _enter(reason, y_norm=None):
     if _RWIN["active"]:
         return
-    if _RWIN["win_owns"]:
-        # Windows 正把它的键鼠送到这台机器：这时候再反过来抢会变成环路
-        log("reverse share: 忽略进入（Windows 正在驱动本机）")
+    # 对端正驱动这台机器时，它的注入也会产生按键/位移。只有注入停下来一小会儿，
+    # 才认为这次是本地有人真的在操作——否则就会两边来回抢（注入的热键触发接管）。
+    if _RWIN["win_owns"] and time.time() - LAST_INPUT_IN["t"] < 0.35:
+        log("reverse share: 忽略进入（对端正驱动本机且刚有注入）")
         return
     sock = _peer_sock()
     if sock is None:
@@ -1163,10 +1167,13 @@ def _enter(reason, y_norm=None):
     _EDGE["since"] = 0.0
     if y_norm is None:
         y_norm = int(round(65535.0 * y / max(1, h - 1)))
-    # 指针本来贴在边上就挪回中间，否则接下来的位移会被屏幕边界夹掉
-    if x <= 3 or y <= 3 or x >= w - 4 or y >= h - 4:
-        _warp(w // 2, h // 2)
-        _RWIN["last_x"], _RWIN["last_y"] = w // 2, h // 2
+    # 进入时无条件把指针挪回屏幕中间：
+    # 从边缘进入时指针贴在 x=0 上，再往那边推会被屏幕边界夹住、位移全丢，
+    # 表现就是「切过去了但光标不动」，然后人手往回一拨又触发了边缘切回。
+    # 抓取期间指针是隐藏的，挪到中间没人看得出来，却换来了整块屏幕的移动余量。
+    _warp(w // 2, h // 2)
+    _RWIN["last_x"], _RWIN["last_y"] = w // 2, h // 2
+    _RWIN["ignore_motion"] = 1
 
     set_pointer_visible(False)
 
@@ -1429,9 +1436,18 @@ def _rwin_tick():
             _tray_notify("已放开本机键鼠", "和 Windows 的连接没有心跳了")
         return True
 
-    if not CONNS or not _RWIN["side"] or _RWIN["win_owns"] or not CONF.get("edge_entry", True):
+    if not CONNS or not _RWIN["side"] or not CONF.get("edge_entry", True):
         _EDGE["since"] = 0.0
         return True
+
+    now = time.time()
+    # 对端正在往这台机器注入输入（它正驱动本机）：此时指针也会被推到边上，
+    # 那不是"有人在本机推鼠标"。只有注入停下来一小会儿，才认为是本地人手在动。
+    idle = now - LAST_INPUT_IN["t"]
+    if _RWIN["win_owns"] and idle < 0.35:
+        _EDGE["since"] = 0.0
+        return True
+
     pos = _query_pointer()
     if pos is None:
         return True
@@ -1443,16 +1459,34 @@ def _rwin_tick():
     side = _RWIN["side"]
     at_edge = ((side == "left" and x <= 0) or (side == "right" and x >= w - 1)
                or (side == "top" and y <= 0) or (side == "bottom" and y >= h - 1))
-    now = time.time()
+
+    # 上一个采样点用来算"推"的速度：慢慢蹭到边上不算，甩过去才算
+    px, py = _EDGE["px"], _EDGE["py"]
+    _EDGE["px"], _EDGE["py"] = x, y
+    fast = False
+    if px >= 0 and py >= 0:
+        if side == "left":
+            fast = x <= 0 and px <= 30 and px - x >= 10
+        elif side == "right":
+            fast = x >= w - 1 and px >= w - 31 and x - px >= 10
+        elif side == "top":
+            fast = y <= 0 and py <= 30 and py - y >= 10
+        else:
+            fast = y >= h - 1 and py >= h - 31 and y - py >= 10
+
     if not at_edge:
         _EDGE["since"] = 0.0
         _EDGE["armed"] = True
         return True
+
+    if not _EDGE["armed"]:
+        return True
     if not _EDGE["since"]:
         _EDGE["since"] = now
-    elif now - _EDGE["since"] >= 0.5 and _EDGE["armed"]:
+    # 甩过去：立刻切，手感跟 Windows 那边推边缘一致；停在边上不动：等 350ms 兜底
+    if fast or now - _EDGE["since"] >= 0.35:
         _EDGE["armed"] = False
-        _enter("边缘进入")
+        _enter("边缘进入" if fast else "边缘停留")
     return True
 
 
@@ -1973,6 +2007,10 @@ def handle_line(line, sock):
     if line.startswith("OWN "):
         # Windows 说：它是不是正在把键鼠送到这台机器。是的话不能反向接管，否则成环路
         _RWIN["win_owns"] = line[4:].strip() != "0"
+        # 归属一变就先撤掉边缘武装：刚交还时指针还压在共享边上，
+        # 不撤的话半秒后就会被判成"又推了一次"，来回来回弹。
+        _EDGE["armed"] = False
+        _EDGE["since"] = 0.0
         return True
     if line.startswith("SW "):
         # Windows 报告自己的屏幕尺寸和相对方位：边缘进入要靠它判定推哪条边
@@ -2047,6 +2085,9 @@ def handle_line(line, sock):
     if len(line) < 3 or line[1] != " ":
         return True
     cmd, payload = line[0], line[2:]
+    if cmd in ("K", "M", "B", "W", "P"):
+        # 记下"对端正在注入"的时间，边缘判定据此区分本地人手和对端驱动
+        LAST_INPUT_IN["t"] = time.time()
     if cmd == "T":
         try:
             text = json.loads(payload)
@@ -2622,7 +2663,7 @@ def main():
         if ensure_display():
             _attach_x_watch()
             _register_hotkey()
-        GLib.timeout_add(120, _rwin_tick)
+        GLib.timeout_add(60, _rwin_tick)
         log("reverse share: hotkey=%s edge_entry=%s share=%s"
             % (CONF.get("hotkey"), CONF.get("edge_entry", True),
                CONF.get("reverse_share", True)))

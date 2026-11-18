@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.7.1.0")]
+[assembly: AssemblyVersion("3.7.2.0")]
 
 namespace TypeBridgeApp
 {
@@ -4019,13 +4019,6 @@ namespace TypeBridgeApp
                 Log.Write("remote drive denied: disabled in settings");
                 return;
             }
-            if (keyboardMode || mouseMode)
-            {
-                // 本机正把键鼠送给 Ubuntu，再反过来接管就成了环路
-                SendLine("RGW no busy");
-                Log.Write("remote drive denied: this machine is driving ubuntu");
-                return;
-            }
             if (settingsOpen)
             {
                 SendLine("RGW no busy");
@@ -4035,8 +4028,49 @@ namespace TypeBridgeApp
             if (remoteDrive)
                 return;
 
+            // 本机正在把键鼠送给 Ubuntu 时对端也可能来接管（人在 Ubuntu 那边推了边缘）。
+            // 硬件 KVM 的规则是谁推过去谁说了算，所以这里先让出控制权再接管，
+            // 不能回 no busy 把人困在远端。
+            // 让出、接管都放到界面线程做：Set*Mode 会动钩子和托盘状态。
+            if (keyboardMode || mouseMode)
+            {
+                Log.Write("remote drive: handing over from local modes");
+                try
+                {
+                    hotkeyForm.BeginInvoke(new Action(delegate
+                    {
+                        SetKeyboardMode(false, false);
+                        SetMouseMode(false, false);
+                        StartRemoteDrive(yNorm);
+                    }));
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    Log.Write("remote drive handover failed: " + ex.Message);
+                }
+            }
+            StartRemoteDrive(yNorm);
+        }
+
+        /// <summary>真正进入反向接管：摆好指针、置位、回 ok。界面线程和读取线程都会走这里。</summary>
+        private void StartRemoteDrive(int yNorm)
+        {
+            if (remoteDrive)
+                return;
+
             if (yNorm < 0) yNorm = 0;
             if (yNorm > 65535) yNorm = 65535;
+
+            // 先让本机钩子把手上的键/光标状态收干净，再摆指针：
+            // RestoreCursor 会把光标送回接管前的位置，顺序反了会把刚摆好的位置拽走。
+            RemoteInput.ReleaseAll();
+            mouseHook.ReleaseAll();
+            mouseHook.RestoreCursor();
+            remoteEdgePush = 0;
+            remoteDrive = true;
+            // 接管期间关掉本机的边缘侦测：否则真实鼠标蹭到边上会再切去 Ubuntu，两边打架
+            mouseHook.Watching = false;
 
             // 指针落到共享边上：Ubuntu 那边指针消失的位置，和这里出现的位置对得上
             Rectangle b = Screen.PrimaryScreen.Bounds;
@@ -4064,11 +4098,6 @@ namespace TypeBridgeApp
             try { Cursor.Position = new Point(x, y); }
             catch { }
 
-            RemoteInput.ReleaseAll();
-            remoteEdgePush = 0;
-            remoteDrive = true;
-            // 接管期间关掉本机的边缘侦测：否则真实鼠标蹭到边上会再切去 Ubuntu，两边打架
-            mouseHook.Watching = false;
             SendLine("RGW ok");
             Log.Write("remote drive start (edge=" + switchEdge + ", y=" + yNorm + ")");
 
@@ -4076,10 +4105,9 @@ namespace TypeBridgeApp
             {
                 hotkeyForm.BeginInvoke(new Action(delegate
                 {
-                    mouseHook.ReleaseAll();
-                    mouseHook.RestoreCursor();
                     UpdateStatus();
-                    ShowTrayTip("TypeBridge", "Ubuntu 正在控制这台电脑，按 " + keyboardHotkey + " 收回");
+                    if (switchToast)
+                        ShowTrayTip("TypeBridge", "Ubuntu 正在控制这台电脑，按 " + keyboardHotkey + " 收回");
                 }));
             }
             catch { }
