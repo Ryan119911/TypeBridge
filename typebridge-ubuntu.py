@@ -130,7 +130,7 @@ _early_pick_display()
 
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Gdk, GLib, GdkPixbuf
+from gi.repository import Gtk, Gdk, GLib, Gio, GdkPixbuf
 
 
 
@@ -1127,6 +1127,13 @@ def _enter(reason, y_norm=None):
     if _RWIN["win_owns"] and time.time() - LAST_INPUT_IN["t"] < 0.25:
         log("reverse share: 忽略进入（对端正驱动本机且刚有注入）")
         return
+    # 锁屏时 gnome-shell 自己抓着键盘，XGrabKeyboard 必然 AlreadyGrabbed。
+    # 不先判这个，用户只会看到「推边完全没反应」，日志里还刷一串 rc=1。
+    if _session_locked():
+        log("reverse share: 图形会话锁屏中，解锁后再推边")
+        _EDGE["cooldown"] = time.time() + 2.0
+        _notify_throttled("Ubuntu 处于锁屏", "解锁后就能用它的键鼠操作 Windows", 15.0)
+        return
     sock = _peer_sock()
     if sock is None:
         _tray_notify("还没连上 Windows", "先在 Windows 端启动 TypeBridge 并连上")
@@ -1142,13 +1149,17 @@ def _enter(reason, y_norm=None):
     rc = _x11.XGrabKeyboard(_DPY, root, 0, 1, 1, 0)   # GrabModeAsync = 1
     if rc != 0:
         log("reverse share: XGrabKeyboard rc=%d" % rc)
-        _tray_notify("无法接管本机键盘", "可能被别的程序占用（游戏 / 录屏），请稍后再试")
+        _EDGE["cooldown"] = time.time() + 2.0
+        _notify_throttled("无法接管本机键盘",
+                          "可能被锁屏或其他程序占用，请稍后再试", 15.0)
         return
     prc = _x11.XGrabPointer(_DPY, root, 0, 4 | 8 | 64, 1, 1, 0, 0, 0)
     if prc != 0:
         log("reverse share: XGrabPointer rc=%d" % prc)
         _ungrab()
-        _tray_notify("无法接管本机鼠标", "可能被别的程序占用，请稍后再试")
+        _EDGE["cooldown"] = time.time() + 2.0
+        _notify_throttled("无法接管本机鼠标",
+                          "可能被其他程序占用，请稍后再试", 15.0)
         return
     _x11.XSync(_DPY, 0)
     try:
@@ -1851,6 +1862,56 @@ def _tray_notify(title, body):
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         log("%s: %s" % (title, body))
+
+
+_NOTIFY_SEEN = {"key": "", "at": 0.0}
+
+
+def _notify_throttled(title, body, window=10.0):
+    """同样的提示在 window 秒内只弹一次——推边失败会每两秒重试一次，
+    不节流的话通知会刷屏。"""
+    key = title + "|" + body
+    now = time.time()
+    if key == _NOTIFY_SEEN["key"] and now - _NOTIFY_SEEN["at"] < window:
+        return
+    _NOTIFY_SEEN["key"] = key
+    _NOTIFY_SEEN["at"] = now
+    _tray_notify(title, body)
+
+
+_LOCK = {"at": 0.0, "value": False}
+
+
+def _session_locked():
+    """图形会话是不是锁屏了。
+
+    锁屏界面（gnome-shell）自己握着键盘和指针的 grab，这时候再去 XGrabKeyboard
+    只会拿到 AlreadyGrabbed，表现就是「推边完全没反应」。
+    优先问 GNOME 的 ScreenSaver，问不到再退回 loginctl；结果缓存 1 秒。
+    """
+    now = time.time()
+    if now - _LOCK["at"] < 1.0:
+        return _LOCK["value"]
+    _LOCK["at"] = now
+    locked = False
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        ret = bus.call_sync("org.gnome.ScreenSaver", "/org/gnome/ScreenSaver",
+                            "org.gnome.ScreenSaver", "GetActive", None,
+                            GLib.VariantType.new("(b)"),
+                            Gio.DBusCallFlags.NONE, 500, None)
+        locked = bool(ret.unpack()[0])
+    except Exception:
+        try:
+            sid = os.environ.get("XDG_SESSION_ID", "")
+            out = subprocess.run(["loginctl", "show-session", sid, "-p", "LockedHint"],
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 timeout=1.0).stdout.decode("utf-8", "replace")
+            locked = "yes" in out
+        except Exception:
+            locked = False
+    _LOCK["value"] = locked
+    return locked
 
 
 def _systemctl_user(action):
