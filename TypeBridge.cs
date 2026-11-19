@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.7.7.0")]
+[assembly: AssemblyVersion("3.7.8.0")]
 
 namespace TypeBridgeApp
 {
@@ -844,6 +844,11 @@ namespace TypeBridgeApp
         internal event EventHandler ToggleRequested;
         internal event EventHandler MouseToggleRequested;
 
+        /// <summary>反向接管期间监听本机真实按键（注入的会被 LLKHF_INJECTED 过滤）。</summary>
+        internal bool LocalWatch;
+        internal event EventHandler LocalInput;
+        private int lastLocalTick;
+
         /// <summary>Ubuntu 模式下用于切回 Windows 的组合键，与托盘注册的热键保持一致。</summary>
         internal Hotkey ToggleHotkey { get; set; }
 
@@ -1114,6 +1119,31 @@ namespace TypeBridgeApp
 
         private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
+            // 反向接管期间：本机键盘出现真实按键（不是我们注入的）就说明人回来了，
+            // 交给上层收回控制权。放行，不做任何拦截。
+            if (nCode >= 0 && LocalWatch && !Enabled)
+            {
+                int raw = wParam.ToInt32();
+                if (raw == WmKeyDown || raw == WmSysKeyDown)
+                {
+                    KbdData kd = (KbdData)Marshal.PtrToStructure(lParam, typeof(KbdData));
+                    if ((kd.Flags & 0x10) == 0)      // LLKHF_INJECTED
+                    {
+                        int now = Environment.TickCount;
+                        if (unchecked(now - lastLocalTick) >= 200)
+                        {
+                            lastLocalTick = now;
+                            EventHandler h = LocalInput;
+                            if (h != null)
+                            {
+                                try { h(this, EventArgs.Empty); }
+                                catch { }
+                            }
+                        }
+                    }
+                }
+            }
+
             if (nCode >= 0)
             {
                 int message = wParam.ToInt32();
@@ -1468,6 +1498,32 @@ namespace TypeBridgeApp
         internal event EventHandler EdgeEntered;
         internal event EventHandler EdgeReturned;
 
+        /// <summary>
+        /// 反向接管期间（Ubuntu 正在用它的键鼠操作本机）监听本机的真实输入。
+        /// 我们自己转发用的 SendInput 事件带 INJECTED 标志，会被过滤掉；
+        /// 只有人手真的碰了本机鼠标才算数——那是"回到这台机器"的信号。
+        /// </summary>
+        internal bool LocalWatch;
+        internal event EventHandler LocalInput;
+        private int lastLocalInputTick;
+
+        private void DetectLocalInput(IntPtr lParam)
+        {
+            MouseData data = (MouseData)Marshal.PtrToStructure(lParam, typeof(MouseData));
+            if ((data.Flags & 1) != 0)      // LLMHF_INJECTED：我们自己注入的
+                return;
+            int now = Environment.TickCount;
+            if (unchecked(now - lastLocalInputTick) < 200)
+                return;
+            lastLocalInputTick = now;
+            EventHandler handler = LocalInput;
+            if (handler != null)
+            {
+                try { handler(this, EventArgs.Empty); }
+                catch { }
+            }
+        }
+
         /// <summary>按住左键拖到判定线上时触发（用于唤出文件传送区）。</summary>
         internal event EventHandler DragEdgeReached;
         private bool dragEdgeFired;
@@ -1722,6 +1778,12 @@ namespace TypeBridgeApp
                     pendingDy = 0;
                     pressedButtons.Clear();
                     edgeHits = 0;
+                    // 反向接管期间本机鼠标本来是被"让出去"的，但要能收回来：
+                    // 人手碰一下本机鼠标就等于说"我回到这台机器了"。
+                    // 少了这条，一旦对端没主动交还，本机会一直停在反向接管态，
+                    // 鼠标怎么动都没反应（用户实测踩到）。
+                    if (LocalWatch)
+                        DetectLocalInput(lParam);
                     return CallNextHookEx(hook, nCode, wParam, lParam);
                 }
 
@@ -1964,9 +2026,9 @@ namespace TypeBridgeApp
             }
 
             edgeHits++;
-            if (edgeHits < 3)
-                return false;
-
+            // 位置判定：推到判定线上就算数，不再要求连续三拍都在边上。
+            // 光标被系统夹在边缘后，系统可能不再产生位置变化，三拍的等待会
+            // 变成"看你手抖不抖"——这就是用户说的"有概率才切得过去"。
             edgeHits = 0;
             edgeArmed = false;
             return true;
@@ -3264,6 +3326,8 @@ namespace TypeBridgeApp
         // 刚接管时本机光标就摆在共享边上，要先往屏幕里走一段才允许"再推出去交还"
         private bool remoteArmed;
         private DateTime remoteDriveSince;
+        // 上一次"本机输入收回控制权"的时刻：同一次按键别再触发切换热键
+        private DateTime localTakeoverAt;
         private DateTime lastPongUtc = DateTime.UtcNow;
 
         [DllImport("user32.dll")]
@@ -3339,6 +3403,8 @@ namespace TypeBridgeApp
             mouseHook.Wheel += HookMouseWheel;
             mouseHook.EdgeEntered += delegate { OnEdgeEntered(); };
             mouseHook.EdgeReturned += delegate { OnEdgeReturned(); };
+            mouseHook.LocalInput += delegate { OnLocalInputDuringRemoteDrive(); };
+            hook.LocalInput += delegate { OnLocalInputDuringRemoteDrive(); };
             mouseHook.DragEdgeReached += delegate { ShowFileZone(); };
             mouseHook.SwitchEdge = switchEdge;
             mouseHook.RemoteWidth = remoteWidth;
@@ -3700,6 +3766,12 @@ namespace TypeBridgeApp
 
         private void ToggleKeyboardMode()
         {
+            // 刚被本机真实输入收回（比如按的就是这个热键）：同一次按压别再把它送出去
+            if ((DateTime.UtcNow - localTakeoverAt).TotalMilliseconds < 400)
+            {
+                Log.Write("toggle ignored (just took back by local input)");
+                return;
+            }
             if (remoteDrive)
             {
                 // 正在被 Ubuntu 驱动时，按本机热键的含义是"收回"，不是"送过去"：
@@ -3748,6 +3820,11 @@ namespace TypeBridgeApp
 
         private void ToggleMouseMode()
         {
+            if ((DateTime.UtcNow - localTakeoverAt).TotalMilliseconds < 400)
+            {
+                Log.Write("mouse toggle ignored (just took back by local input)");
+                return;
+            }
             if (remoteDrive)
             {
                 EndRemoteDrive("本机热键收回", true);
@@ -4054,7 +4131,11 @@ namespace TypeBridgeApp
                 return;
             }
             if (remoteDrive)
+            {
+                // 已经在接管中：再收到一次请求就当确认，别默不作声让对端干等 1.5 秒超时
+                SendLine("RGW ok");
                 return;
+            }
 
             // 本机正在把键鼠送给 Ubuntu 时对端也可能来接管（人在 Ubuntu 那边推了边缘）。
             // 硬件 KVM 的规则是谁推过去谁说了算，所以这里先让出控制权再接管，
@@ -4082,6 +4163,28 @@ namespace TypeBridgeApp
         }
 
         /// <summary>真正进入反向接管：摆好指针、置位、回 ok。界面线程和读取线程都会走这里。</summary>
+        /// <summary>
+        /// 反向接管期间本机出现了真实输入（不是我们注入的）：人回到这台机器了，
+        /// 立刻把控制权收回来，并通知 Ubuntu 放开抓取。
+        /// </summary>
+        private void OnLocalInputDuringRemoteDrive()
+        {
+            if (!remoteDrive)
+                return;
+            // 钩子回调里先不直接收尾（会动钩子状态），挪到界面线程做
+            try
+            {
+                hotkeyForm.BeginInvoke(new Action(delegate
+                {
+                    if (!remoteDrive)
+                        return;
+                    localTakeoverAt = DateTime.UtcNow;
+                    EndRemoteDrive("本机输入", true);
+                }));
+            }
+            catch { }
+        }
+
         private void StartRemoteDrive(int yNorm)
         {
             if (remoteDrive)
@@ -4099,6 +4202,12 @@ namespace TypeBridgeApp
             remoteArmed = false;
             remoteDrive = true;
             remoteDriveSince = DateTime.UtcNow;
+            // 接管期间关掉本机的边缘侦测：否则真实鼠标蹭到边上会再切去 Ubuntu，两边打架
+            mouseHook.Watching = false;
+            // 但本机真实输入要能"叫醒"：人手碰一下鼠标/键盘就收回控制权，
+            // 否则对端一旦没主动交还，本机就一直停在接管态、鼠标怎么动都没反应。
+            mouseHook.LocalWatch = true;
+            hook.LocalWatch = true;
             // 接管期间关掉本机的边缘侦测：否则真实鼠标蹭到边上会再切去 Ubuntu，两边打架
             mouseHook.Watching = false;
 
@@ -4151,6 +4260,8 @@ namespace TypeBridgeApp
         {
             bool wasActive = remoteDrive;
             remoteDrive = false;
+            mouseHook.LocalWatch = false;
+            hook.LocalWatch = false;
             RemoteInput.ReleaseAll();
             if (!wasActive)
                 return;
