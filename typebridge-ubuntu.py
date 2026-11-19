@@ -2207,6 +2207,15 @@ def on_accept(fd, cond):
     CONNS[conn.fileno()] = st
     refresh_tray()
     log("client connected: %s:%s" % (addr[0], addr[1]))
+    # 新连接 = 对端是刚起来的进程，SW/OWN 都会重新下发。
+    # 先把旧会话的归属标记清掉：上次断线时若停在「Windows 正在驱动本机」，
+    # win_owns 会残留成 1，边缘进入就会一直走「本机鼠标活动」分支，
+    # 表现成「推边有时候要推好几下」。
+    _RWIN["win_owns"] = False
+    LAST_INPUT_IN["t"] = 0.0
+    _EDGE["px"] = -1
+    _EDGE["py"] = -1
+    _EDGE["since"] = 0.0
     src = GLib.io_add_watch(conn.fileno(),
                             GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR,
                             on_data, conn, addr)
