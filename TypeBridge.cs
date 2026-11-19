@@ -14,7 +14,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.7.5.0")]
+[assembly: AssemblyVersion("3.7.6.0")]
 
 namespace TypeBridgeApp
 {
@@ -1405,6 +1405,8 @@ namespace TypeBridgeApp
         private bool edgeArmed = true;
         private int edgeHits;
         private int edgeCooldownUntil;
+        // 刚切进 Ubuntu 时贴着共享边，要先往屏幕里走一段才允许"再推出去回来"
+        private bool edgeReturnArmed;
         private int virtualX;
         private int virtualY;
         private string switchEdge = "right";
@@ -1480,6 +1482,26 @@ namespace TypeBridgeApp
             virtualY = y;
             tracking = true;
             edgeArmed = false;
+            edgeReturnArmed = false;
+        }
+
+        /// <summary>
+        /// 虚拟光标离「和 Windows 相接的那条边」还有多远（像素，越小越贴边）。
+        /// 用来判断"是不是已经走进 Ubuntu 里面了"。
+        /// </summary>
+        private int InsideDistance()
+        {
+            switch (switchEdge)
+            {
+                case "left":
+                    return remoteWidth - 1 - virtualX;
+                case "top":
+                    return remoteHeight - 1 - virtualY;
+                case "bottom":
+                    return virtualY;
+                default:
+                    return virtualX;
+            }
         }
 
         internal void StopTracking()
@@ -1758,9 +1780,15 @@ namespace TypeBridgeApp
                             {
                                 virtualX += dx;
                                 virtualY += dy;
+                                // 刚切进 Ubuntu 时是贴着共享边进来的（进来点只离边 48px）：
+                                // 先得往屏幕里走够 100px 才算就绪，之后往外推才是"要回 Windows"。
+                                // 没有这道就绪条件，推过去时手一抖往回带几十像素就会立刻弹回去。
+                                if (!edgeReturnArmed && InsideDistance() >= 100)
+                                    edgeReturnArmed = true;
                                 // 位置判定：光标推到「和 Windows 相接的那条边」就切回，
                                 // 和 Windows 自己的多屏切换一致——不要求推得快，推到边上就算。
-                                if (ShouldReturnToWindows(switchEdge, virtualX, virtualY, remoteWidth, remoteHeight))
+                                if (edgeReturnArmed
+                                    && ShouldReturnToWindows(switchEdge, virtualX, virtualY, remoteWidth, remoteHeight))
                                 {
                                     tracking = false;
                                     pendingDx = 0;
@@ -3233,6 +3261,8 @@ namespace TypeBridgeApp
         private volatile bool remoteDrive;
         private bool reverseEnable = true;
         private int remoteEdgePush;
+        // 刚接管时本机光标就摆在共享边上，要先往屏幕里走一段才允许"再推出去交还"
+        private bool remoteArmed;
         private DateTime remoteDriveSince;
         private DateTime lastPongUtc = DateTime.UtcNow;
 
@@ -3984,8 +4014,8 @@ namespace TypeBridgeApp
             mouseHook.BeginTracking(rx, ry);
             SendLine("P " + rx.ToString() + " " + ry.ToString());
             Log.Write("enter remote: " + reason);
-            if (switchToast)
-                ShowTrayTip("TypeBridge", reason + " → Ubuntu");
+            // 边缘切换是高频动作，不再弹浮层：每次切过去都弹一个"→ Ubuntu"很碍事，
+            // 光标出现在哪块屏幕上本身就是最直接的反馈。
         }
 
         // ---------- 反向共享：Ubuntu 驱动本机 ----------
@@ -4066,6 +4096,7 @@ namespace TypeBridgeApp
             mouseHook.ReleaseAll();
             mouseHook.RestoreCursor();
             remoteEdgePush = 0;
+            remoteArmed = false;
             remoteDrive = true;
             remoteDriveSince = DateTime.UtcNow;
             // 接管期间关掉本机的边缘侦测：否则真实鼠标蹭到边上会再切去 Ubuntu，两边打架
@@ -4127,7 +4158,7 @@ namespace TypeBridgeApp
             if (tellUbuntu && stream != null)
                 SendLine("RGW 0");
             remoteEdgePush = 0;
-            // 恢复边缘侦测（只在 Windows 模式下才该盯着边缘）
+            remoteArmed = false;
             mouseHook.Watching = edgeSwitch && stream != null && !mouseMode;
             // 交还时本机光标往往还压在共享边上：真实鼠标一动就会又被边缘切走，
             // 表现成「刚交还就自己切回 Ubuntu」。主动挪进来一点，和切回逻辑一致。
@@ -4185,6 +4216,32 @@ namespace TypeBridgeApp
 
             Rectangle b = Screen.PrimaryScreen.Bounds;
             Point p = Cursor.Position;
+            // 接管时指针就摆在共享边上：先往屏幕里走够 80px 才算就绪。
+            // 少了这道就绪条件，推过来时手还在往外带（或随手往回拨一下），
+            // 几十像素就凑满阈值 -> 立刻交还，表现就是「刚切过去就弹回来」。
+            int inside;
+            switch (switchEdge)
+            {
+                case "left":
+                    inside = p.X - b.Left;
+                    break;
+                case "top":
+                    inside = p.Y - b.Top;
+                    break;
+                case "bottom":
+                    inside = b.Bottom - 1 - p.Y;
+                    break;
+                default:
+                    inside = b.Right - 1 - p.X;
+                    break;
+            }
+            if (!remoteArmed)
+            {
+                remoteEdgePush = 0;
+                if (inside >= 80)
+                    remoteArmed = true;
+                return;
+            }
             bool pushing;
             switch (switchEdge)
             {
@@ -4215,7 +4272,7 @@ namespace TypeBridgeApp
                 return;
             }
             remoteEdgePush += step;
-            if (remoteEdgePush < 90)
+            if (remoteEdgePush < 50)
                 return;
             remoteEdgePush = 0;
             ReturnToUbuntuByEdge();
@@ -4265,15 +4322,6 @@ namespace TypeBridgeApp
                     default: local.X = b.Right - gap; break;
                 }
                 Cursor.Position = local;
-            }
-            catch { }
-            try
-            {
-                hotkeyForm.BeginInvoke(new Action(delegate
-                {
-                    if (switchToast)
-                        ShowTrayTip("TypeBridge", "已交回 Ubuntu");
-                }));
             }
             catch { }
         }

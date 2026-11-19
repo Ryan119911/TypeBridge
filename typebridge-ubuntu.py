@@ -964,7 +964,8 @@ def _query_pointer():
 
 
 def _warp(x, y):
-    if not _DPY:
+    if not _DPY or not _xcap_ready():
+        # 原型没装配就调 XWarpPointer，_DPY 会被当成 32 位 int 传进去、直接段错误
         return
     try:
         _x11.XWarpPointer(_DPY, 0, _root_window(), 0, 0, 0, 0, int(x), int(y))
@@ -1210,9 +1211,9 @@ def _leave(reason, tell_windows=True, warp=True):
     # 交还后先别急着允许边缘再进：指针还压在边上，否则会立刻又切走
     _EDGE["since"] = 0.0
     _EDGE["armed"] = False
-    # 交还后 1.2 秒内不再判定任何进入：指针刚被摆回边界内侧，
-    # 这段时间的位移/跳变都可能被误当成"又推了一次"。
-    _EDGE["cooldown"] = time.time() + 1.2
+    # 交还后 0.35 秒内不再判定进入：指针刚被摆回边界内侧（40px），
+    # 再短会误判，再长就是「想马上切回去却要干等」。
+    _EDGE["cooldown"] = time.time() + 0.35
     _LOCAL_MOVE["hits"] = 0
     if warp:
         _warp_inside()
@@ -1492,34 +1493,41 @@ def _rwin_tick():
 
     _LOCAL_MOVE["hits"] = 0
 
-    # 允许 1px 误差：某些主题/缩放下落点停在 1 而不是 0，卡死在那里就永远进不去
-    at_edge = ((side == "left" and x <= 1) or (side == "right" and x >= w - 2)
-               or (side == "top" and y <= 1) or (side == "bottom" and y >= h - 2))
+    # 允许 2px 误差：某些主题/缩放下落点停在 1 而不是 0，卡死在那里就永远进不去
+    at_edge = ((side == "left" and x <= 2) or (side == "right" and x >= w - 3)
+               or (side == "top" and y <= 2) or (side == "bottom" and y >= h - 3))
 
-    fast = False
+    # 位置判定：指针推到共享边就切，不看推得快慢。
+    # 「落到边上」这一拍立刻切——轮询是 60ms，正常推鼠标时上一拍常常还在 40px 外，
+    # 所以不能要求上一拍已经很贴边（以前那个 px<=31 的条件让快速推边永远走兜底路径，
+    # 用户就得贴着边干等 0.35 秒）。已经在边上停着时只用 0.12 秒去抖。
+    arrived = False
     if px >= 0 and py >= 0:
         if side == "left":
-            fast = x <= 1 and px <= 31 and px - x >= 10
+            arrived = x <= 2 and px > x
         elif side == "right":
-            fast = x >= w - 2 and px >= w - 32 and x - px >= 10
+            arrived = x >= w - 3 and px < x
         elif side == "top":
-            fast = y <= 1 and py <= 31 and py - y >= 10
+            arrived = y <= 2 and py > y
         else:
-            fast = y >= h - 2 and py >= h - 32 and y - py >= 10
+            arrived = y >= h - 3 and py < y
 
     if not at_edge:
         _EDGE["since"] = 0.0
         _EDGE["armed"] = True
         return True
 
-    if not _EDGE["armed"]:
-        return True
     if not _EDGE["since"]:
         _EDGE["since"] = now
-    # 位置判定：光标停在共享边上就算数（甩过去立刻切，慢慢蹭到边停 0.35 秒也切）
-    if fast or now - _EDGE["since"] >= 0.35:
+    if not _EDGE["armed"]:
+        # 上一次进入失败（对端没连上 / 被拒绝）时指针还压在边上，会一直卡在
+        # 「贴边完全没反应」的状态。停够 0.8 秒就重新武装，允许再试一次。
+        if now - _EDGE["since"] < 0.8:
+            return True
+        _EDGE["armed"] = True
+    if arrived or now - _EDGE["since"] >= 0.12:
         _EDGE["armed"] = False
-        _enter("边缘进入" if fast else "边缘停留")
+        _enter("边缘进入" if arrived else "边缘停留")
     return True
 
 
@@ -2072,8 +2080,9 @@ def handle_line(line, sock):
                 log("reverse share: Windows 已确认接管")
         elif arg == "0":
             if _RWIN["active"]:
+                # 别再弹桌面通知：边缘切换是高频操作，每切一次弹一个气泡很碍事，
+                # 托盘图标和指针本身已经足够说明控制权在哪边。
                 _leave("Windows 收回", tell_windows=False)
-                _tray_notify("控制权已回到本机", "Windows 那边把键盘鼠标收回去了")
         elif arg.startswith("no"):
             if _RWIN["active"]:
                 _leave("Windows 拒绝", tell_windows=False)
