@@ -771,7 +771,7 @@ _RWIN = {
 }
 _HOT = {"code": 0, "mask": 0, "tried": 0.0, "cooldown": 0.0}
 _EDGE = {"since": 0.0, "armed": True, "px": -1, "py": -1, "cooldown": 0.0}
-_LOCAL_MOVE = {"hits": 0}
+_LOCAL_MOVE = {"t": 0.0}
 # 最近一次收到对端注入（K/M/B/W）的时间：用来分辨「本机真的有人在推」
 # 和「对端正在驱动这台机器」——后者指针也会动到边上，不能当成切换意图。
 LAST_INPUT_IN = {"t": 0.0}
@@ -1214,7 +1214,7 @@ def _leave(reason, tell_windows=True, warp=True):
     # 交还后 0.35 秒内不再判定进入：指针刚被摆回边界内侧（40px），
     # 再短会误判，再长就是「想马上切回去却要干等」。
     _EDGE["cooldown"] = time.time() + 0.35
-    _LOCAL_MOVE["hits"] = 0
+    _LOCAL_MOVE["t"] = 0.0
     if warp:
         _warp_inside()
     log("reverse share: 交还本机（%s）" % reason)
@@ -1452,13 +1452,13 @@ def _rwin_tick():
 
     if not CONNS or not _RWIN["side"] or not CONF.get("edge_entry", True):
         _EDGE["since"] = 0.0
-        _LOCAL_MOVE["hits"] = 0
+        _LOCAL_MOVE["t"] = 0.0
         return True
 
     now = time.time()
     if now < _EDGE["cooldown"]:
         _EDGE["since"] = 0.0
-        _LOCAL_MOVE["hits"] = 0
+        _LOCAL_MOVE["t"] = 0.0
         return True
 
     pos = _query_pointer()
@@ -1475,27 +1475,25 @@ def _rwin_tick():
     side = _RWIN["side"]
     moved = px >= 0 and abs(x - px) + abs(y - py) >= 3
 
-    # 对端正驱动本机：不能用"推边缘"抢回来——对端的指针经常就停在共享边上，
-    # 一停就会把控制权抢回来，表现成「刚切到 Ubuntu，碰到左边就弹回去」。
-    # 改成看连续的本机鼠标活动：对端没在动（没有注入）而指针连续几拍都在动，
-    # 那只能是有人在本机搬鼠标，这时候接管才符合直觉。
-    # 单次的 warp 跳变只会命中一拍，不会误判。
-    if _RWIN["win_owns"]:
-        if idle > 0.30 and moved:
-            _LOCAL_MOVE["hits"] += 1
-        else:
-            _LOCAL_MOVE["hits"] = 0
-        if _LOCAL_MOVE["hits"] >= 3:
-            _LOCAL_MOVE["hits"] = 0
-            _enter("本机鼠标活动")
-        _EDGE["since"] = 0.0
-        return True
-
-    _LOCAL_MOVE["hits"] = 0
-
     # 允许 2px 误差：某些主题/缩放下落点停在 1 而不是 0，卡死在那里就永远进不去
     at_edge = ((side == "left" and x <= 2) or (side == "right" and x >= w - 3)
                or (side == "top" and y <= 2) or (side == "bottom" and y >= h - 3))
+
+    # 对端正驱动本机：不能按位置判——它注入的指针经常就停在共享边上，
+    # 一停就会把控制权抢回来，表现成「刚切到 Ubuntu，碰到左边就弹回去」。
+    # 但只要注入停了 0.3 秒，指针再动就只可能是本机有人在操作：记下这个时刻，
+    # 之后 0.3 秒内落到边上就接管。这样「快速一甩再按住」也不会漏掉
+    # （以前要求连续三拍都在动，甩过去停住就不动了，永远凑不满）。
+    if _RWIN["win_owns"]:
+        if idle > 0.30 and moved:
+            _LOCAL_MOVE["t"] = now
+        if idle > 0.30 and at_edge and now - _LOCAL_MOVE["t"] < 0.30:
+            _LOCAL_MOVE["t"] = 0.0
+            _enter("本机推边缘")
+        _EDGE["since"] = 0.0
+        return True
+
+    _LOCAL_MOVE["t"] = 0.0
 
     # 位置判定：指针推到共享边就切，不看推得快慢。
     # 「落到边上」这一拍立刻切——轮询是 60ms，正常推鼠标时上一拍常常还在 40px 外，
