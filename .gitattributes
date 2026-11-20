@@ -1,0 +1,6 @@
+*.py text eol=lf
+*.sh text eol=lf
+ubuntu/typebridge-daemon text eol=lf
+ubuntu/typebridge-ui text eol=lf
+ubuntu/*.service text eol=lf
+ubuntu/*.desktop text eol=lf

@@ -16,6 +16,7 @@ mkdir -p \
     "$PKG/usr/share/icons/hicolor"
 
 install -m 755 "$ROOT/typebridge-ubuntu.py" "$PKG/usr/lib/typebridge/typebridge-ubuntu.py"
+install -m 644 "$ROOT"/typebridge_*.py "$PKG/usr/lib/typebridge/"
 install -m 755 "$ROOT/typebridge-drop.py" "$PKG/usr/lib/typebridge/typebridge-drop.py"
 install -m 755 "$ROOT/ubuntu/typebridge-ui.py" "$PKG/usr/lib/typebridge/typebridge-ui.py"
 install -m 755 "$ROOT/ubuntu/typebridge-ui" "$PKG/usr/bin/typebridge-ui"
@@ -102,5 +103,5 @@ EOF
 
 chmod 755 "$PKG/DEBIAN/postinst" "$PKG/DEBIAN/prerm"
 mkdir -p "$ROOT/dist"
-dpkg-deb --build "$PKG" "$ROOT/dist/typebridge_${VERSION}_all.deb"
+dpkg-deb --root-owner-group --build "$PKG" "$ROOT/dist/typebridge_${VERSION}_all.deb"
 echo "$ROOT/dist/typebridge_${VERSION}_all.deb"

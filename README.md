@@ -104,6 +104,7 @@ TypeBridge 让 Windows 上的输入直接进入 Ubuntu 当前窗口：键盘、�
 ```bash
 sudo apt install -y python3-gi gir1.2-gtk-3.0 xdotool
 install -Dm755 typebridge-ubuntu.py ~/.local/bin/typebridge.py
+install -m644 typebridge_protocol.py typebridge_files.py ~/.local/bin/
 ```
 
 `~/.config/systemd/user/typebridge.service`：
@@ -165,6 +166,8 @@ Ubuntu 端配置在 `~/.config/typebridge/config.json`：
 3. 之后右键托盘图标 →「设置...」可随时修改。
 
 依赖只有系统自带的 .NET Framework 4.x，不需要额外安装运行时。
+
+如果 Windows Terminal 或其他目标程序以管理员权限运行，请在 TypeBridge 托盘菜单选择「以管理员权限重启（兼容管理员终端）」并确认 Windows 授权提示。托盘显示「管理员模式已开启」后，再使用热键或屏幕边缘切换。Windows 的权限隔离会限制普通权限程序对管理员窗口的输入操作。
 
 ### 两边怎么连
 
@@ -275,3 +278,8 @@ Windows 端使用全局键盘/鼠标钩子：只在 Ubuntu 模式下拦截并转
 推 `main` 由 GitHub Actions 产出 EXE 与 DEB；推 `v*` 标签自动创建 Release。
 
 本地构建：Windows 双击 `build.bat`（用系统自带 .NET Framework，不需要 Visual Studio）；Ubuntu 上 `VERSION=<版本> bash ubuntu/build-deb.sh`，产物在 `dist/`。
+
+Windows 回归测试运行 `powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1 -Test`。
+Ubuntu 回归测试运行 `python3 tests/run_linux.py`，需要 `xvfb`、`x11-utils` 以及正常运行所需的 GTK 和 xdotool。测试在独立的 X11 显示 `:97` 中运行。
+
+Windows 的连接、剪贴板、文件、反向控制和输入钩子分别放在 `BridgeTransport.cs`、`BridgeClipboard.cs`、`BridgeFiles.cs`、`BridgeReverse.cs` 和 `InputHooks.cs`。`ControlProtocol.cs` 管理分帧与有界发送队列。Ubuntu 的文件传输和协议缓冲位于 `typebridge_files.py` 与 `typebridge_protocol.py`。这些模块使用系统运行时和标准库。

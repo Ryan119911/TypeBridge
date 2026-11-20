@@ -19,3 +19,5 @@ __pycache__/
 *.pyc
 
 TypeBridge.exe.new
+test-output/
+test-linux-*.log

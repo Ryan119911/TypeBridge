@@ -52,6 +52,8 @@ import subprocess
 import sys
 import threading
 import time
+from typebridge_files import FileReceiver, push_file, valid_file_dir
+from typebridge_protocol import LineBuffer, OutputBuffer
 
 faulthandler.enable()
 
@@ -134,7 +136,7 @@ from gi.repository import Gtk, Gdk, GLib, Gio, GdkPixbuf
 
 
 
-CONF_DIR = os.path.expanduser("~/.config/typebridge")
+CONF_DIR = os.environ.get("TYPEBRIDGE_CONFIG_DIR", os.path.expanduser("~/.config/typebridge"))
 CONF_FILE = os.path.join(CONF_DIR, "config.json")
 ROUTES_FILE = os.path.join(CONF_DIR, "routes.json")
 
@@ -396,6 +398,7 @@ try:
     _x11.XOpenDisplay.restype = ctypes.c_void_p
     _x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
     _x11.XFlush.argtypes = [ctypes.c_void_p]
+    _x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
     _x11.XDefaultRootWindow.restype = ctypes.c_ulong
     _x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
     _DPY = _x11.XOpenDisplay(None)
@@ -453,6 +456,7 @@ def pick_display():
             except Exception:
                 dpy = None
             if dpy:
+                lib.XCloseDisplay(dpy)
                 os.environ["DISPLAY"] = display
                 log("picked DISPLAY=%s XAUTHORITY=%s" % (display, os.environ.get("XAUTHORITY") or "-"))
                 return True
@@ -1020,15 +1024,12 @@ def _conn_send(sock, data):
     if sock is None:
         return False
     st = CONNS.get(sock.fileno())
-    if st is None:
-        try:
-            sock.sendall(data)
-            return True
-        except OSError:
-            return False
-    st["out"] = (st.get("out") or b"") + data
-    if len(st["out"]) > (4 << 20):
-        drop(sock.fileno(), "reverse output overflow")
+    if st is None or st["sock"] is not sock:
+        return False
+    try:
+        st["out"].append(data)
+    except ValueError:
+        drop(sock.fileno(), "control output overflow")
         return False
     return _conn_flush(sock.fileno())
 
@@ -1037,23 +1038,15 @@ def _conn_flush(fd):
     st = CONNS.get(fd)
     if st is None:
         return False
-    buf = st.get("out") or b""
-    while buf:
-        try:
-            sent = st["sock"].send(buf)
-        except (BlockingIOError, InterruptedError):
-            break
-        except OSError:
-            drop(fd, "reverse send failed")
-            return False
-        if sent <= 0:
-            break
-        buf = buf[sent:]
-    st["out"] = buf
-    if buf:
+    try:
+        drained = st["out"].flush(st["sock"])
+    except OSError:
+        drop(fd, "control send failed")
+        return False
+    if not drained:
         if not st.get("out_watch"):
             st["out_watch"] = GLib.io_add_watch(
-                fd, GLib.IO_OUT | GLib.IO_HUP | GLib.IO_ERR, _on_writable)
+                fd, GLib.IO_OUT | GLib.IO_HUP | GLib.IO_ERR, _on_writable, st["sock"])
     elif st.get("out_watch"):
         try:
             GLib.source_remove(st["out_watch"])
@@ -1063,12 +1056,14 @@ def _conn_flush(fd):
     return True
 
 
-def _on_writable(fd, cond):
-    if CONNS.get(fd) is None:
+def _on_writable(fd, cond, sock):
+    st = CONNS.get(fd)
+    if st is None or st["sock"] is not sock:
         return False
     if cond & (GLib.IO_HUP | GLib.IO_ERR):
         return drop(fd, "closed while writing")
-    return _conn_flush(fd)
+    _conn_flush(fd)
+    return bool(st.get("out_watch"))
 
 
 def _send_event(line):
@@ -1569,13 +1564,9 @@ _seq = {"clip": 0}
 def broadcast(line):
     data = (line + "\n").encode("utf-8")
     sent = 0
-    for fd, st in list(CONNS.items()):
-        try:
-            st["sock"].sendall(data)
+    for st in list(CONNS.values()):
+        if _conn_send(st["sock"], data):
             sent += 1
-        except OSError:
-            # 已经发出半行，留着只会让对端把残帧和下一行拼在一起
-            drop(fd, "broadcast failed")
     return sent
 
 
@@ -2053,7 +2044,7 @@ def handle_line(line, sock):
     """返回 False 表示对端请求断开(QUIT)"""
     if line == "PING":
         try:
-            sock.sendall(b"PONG\n")
+            _conn_send(sock, b"PONG\n")
         except OSError:
             pass
         return True
@@ -2077,7 +2068,7 @@ def handle_line(line, sock):
             pass
         log("file_dir -> %s" % resolve_file_dir())
         try:
-            sock.sendall(("DIR " + resolve_file_dir() + "\n").encode("utf-8"))
+            _conn_send(sock, ("DIR " + resolve_file_dir() + "\n").encode("utf-8"))
         except OSError:
             pass
         return True
@@ -2089,14 +2080,14 @@ def handle_line(line, sock):
             st = CONNS.get(sock.fileno())
             addr = st["addr"][0] if st else "0.0.0.0"
         try:
-            sock.sendall(("PEER " + addr + "\n").encode("utf-8"))
+            _conn_send(sock, ("PEER " + addr + "\n").encode("utf-8"))
         except OSError:
             pass
         return True
     if line == "WHERE":
         # Windows 端问：文件到底会落到哪个目录
         try:
-            sock.sendall(("DIR " + resolve_file_dir() + "\n").encode("utf-8"))
+            _conn_send(sock, ("DIR " + resolve_file_dir() + "\n").encode("utf-8"))
         except OSError:
             pass
         return True
@@ -2183,7 +2174,7 @@ def handle_line(line, sock):
             log("open receive dir failed: %r" % (e,))
             reply = "OPEN %s" % (e,)
         try:
-            sock.sendall((reply + "\n").encode("utf-8"))
+            _conn_send(sock, (reply + "\n").encode("utf-8"))
         except OSError:
             pass
         return True
@@ -2224,22 +2215,18 @@ def handle_line(line, sock):
     return True
 
 
-def process_buffer(st):
-    sock, buf = st["sock"], st["buf"]
-    while b"\n" in buf:
-        raw, buf = buf.split(b"\n", 1)
-        line = raw.decode("utf-8", "replace").rstrip("\r")
+def process_buffer(st, data):
+    sock = st["sock"]
+    for line in st["framer"].feed(data):
         # 非位移指令前先把积攒的位移落下去，保证"先移动后点击"的顺序
         if line[:1] != "M":
             flush_move()
         try:
             if not handle_line(line, sock):
-                st["buf"] = buf
                 flush_move()
                 return False
         except Exception as e:
             log("handle error: %r" % (e,))
-    st["buf"] = buf
     flush_move()
     return True
 
@@ -2257,15 +2244,17 @@ def on_accept(fd, cond):
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     except OSError:
         pass
+    conn.setblocking(False)
+    st = {"sock": conn, "addr": addr, "framer": LineBuffer(), "out": OutputBuffer(), "out_watch": 0}
+    CONNS[conn.fileno()] = st
     # 先告诉客户端远端屏幕尺寸，边缘切屏要用它算坐标
     try:
         screen = Gdk.Screen.get_default()
-        conn.sendall(("S %d %d\n" % (screen.get_width(), screen.get_height())).encode("utf-8"))
+        _conn_send(conn, ("S %d %d\n" % (screen.get_width(), screen.get_height())).encode("utf-8"))
     except Exception as e:
         log("screen size send failed: %r" % (e,))
-    conn.setblocking(False)
-    st = {"sock": conn, "addr": addr, "buf": b""}
-    CONNS[conn.fileno()] = st
+    if conn.fileno() < 0:
+        return True
     refresh_tray()
     log("client connected: %s:%s" % (addr[0], addr[1]))
     # 新连接 = 对端是刚起来的进程，SW/OWN 都会重新下发。
@@ -2277,7 +2266,7 @@ def on_accept(fd, cond):
     _EDGE["px"] = -1
     _EDGE["py"] = -1
     _EDGE["since"] = 0.0
-    src = GLib.io_add_watch(conn.fileno(),
+    st["reader"] = GLib.io_add_watch(conn.fileno(),
                             GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR,
                             on_data, conn, addr)
     log("data watch fd=%d" % conn.fileno())
@@ -2286,7 +2275,7 @@ def on_accept(fd, cond):
 
 def on_data(fd, cond, conn, addr):
     st = CONNS.get(fd)
-    if st is None:
+    if st is None or st["sock"] is not conn:
         return False
     if cond & (GLib.IO_HUP | GLib.IO_ERR):
         return drop(fd, "closed: %s" % addr[0])
@@ -2298,19 +2287,21 @@ def on_data(fd, cond, conn, addr):
         return drop(fd, "recv error")
     if not data:
         return drop(fd, "client closed: %s" % addr[0])
-    st["buf"] += data
     # 反向共享靠这条时间戳判断链路是不是还活着（Windows 每秒发 PING）
     LAST_RX["t"] = time.time()
-    if len(st["buf"]) > 1 << 20:
-        return drop(fd, "buffer overflow")
-    if not process_buffer(st):
-        return drop(fd, "quit: %s" % addr[0])
+    try:
+        if not process_buffer(st, data):
+            return drop(fd, "quit: %s" % addr[0])
+    except (ValueError, UnicodeError):
+        return drop(fd, "invalid control frame")
     return True
 
 
 def drop(fd, msg):
     st = CONNS.pop(fd, None)
     if st:
+        if st.get("reader"):
+            GLib.source_remove(st["reader"])
         try:
             st["sock"].close()
         except OSError:
@@ -2338,41 +2329,6 @@ srv = None
 
 # ---------- 文件接收（独立端口：一行头 + 原始字节） ----------
 
-FILE_MAX_NAME = 180
-CLIPIMG_MAX_BYTES = 64 << 20      # 剪贴板图片只进内存，必须有上限
-CLIPIMG_MAX_TEXT = 1 << 20
-
-
-def safe_name(name):
-    """只保留文件名本体，去掉路径和危险字符，避免写到别处。"""
-    name = os.path.basename((name or "").replace("\\", "/")).strip()
-    name = re.sub(r'[\x00-\x1f<>:"/\\|?*]', "_", name)
-    if name in ("", ".", ".."):
-        name = "file"
-    if len(name) > FILE_MAX_NAME:
-        root, ext = os.path.splitext(name)
-        name = root[:FILE_MAX_NAME - len(ext)] + ext
-    return name
-
-
-def unique_path(directory, name):
-    """同名只保留一份：直接覆盖，不再生成 (1)、(2) 副本。"""
-    return os.path.join(directory, name)
-
-
-def valid_file_dir(target):
-    """拒绝路径穿越和系统目录：控制端口没有认证，DIR 是可被任意对端改写的持久化配置。"""
-    if ".." in target.replace("\\", "/").split("/"):
-        return False
-    path = os.path.abspath(os.path.expanduser(target))
-    blocked = ("/etc", "/usr", "/bin", "/sbin", "/lib", "/proc", "/sys",
-               "/dev", "/boot", "/root", "/var", "/opt")
-    for prefix in blocked:
-        if path == prefix or path.startswith(prefix + os.sep):
-            return False
-    return True
-
-
 def resolve_file_dir(name=""):
     """默认直接落到桌面：不装任何 Ubuntu 端程序也能看到文件。"""
     configured = str(CONF.get("file_dir") or "").strip()
@@ -2389,217 +2345,6 @@ def resolve_file_dir(name=""):
         if os.path.isdir(path):
             return path
     return os.path.expanduser("~/Downloads")
-
-
-def part_meta_path(dest):
-    return dest + ".part.info"
-
-
-_PART_LOCKS = {}
-_PART_LOCKS_GUARD = threading.Lock()
-
-
-def part_lock_for(dest):
-    with _PART_LOCKS_GUARD:
-        lock = _PART_LOCKS.get(dest)
-        if lock is None:
-            lock = threading.Lock()
-            _PART_LOCKS[dest] = lock
-        return lock
-
-
-def resume_offset(dest, name, size):
-    """已经收到多少字节可以接着传。文件名或总大小对不上就返回 0，绝不能拼错文件。"""
-    part = dest + ".part"
-    try:
-        with open(part_meta_path(dest), "r", encoding="utf-8") as fh:
-            meta = json.load(fh)
-    except Exception:
-        return 0
-    if meta.get("name") != name or meta.get("size") != size:
-        return 0
-    try:
-        have = os.path.getsize(part)
-    except OSError:
-        return 0
-    if have <= 0 or have >= size:
-        return 0
-    return have
-
-
-def handle_upload(conn, addr):
-    try:
-        conn.settimeout(120)  # 空闲 120s 才判死：大文件+慢链路别动不动断
-        stream = conn.makefile("rb")
-        header = stream.readline(4096).decode("utf-8", "replace").strip()
-        parts = header.split(" ", 2)
-        if len(parts) != 3 or parts[0] not in ("UPLOAD", "CLIPIMG", "RESUME"):
-            log("file: bad header %r from %s" % (header[:60], addr[0]))
-            conn.sendall(b"ERR bad header\n")
-            return
-        try:
-            size = int(parts[1])
-        except ValueError:
-            conn.sendall(b"ERR bad size\n")
-            return
-        if size < 0:
-            conn.sendall(b"ERR bad size\n")
-            return
-
-        if parts[0] == "RESUME":
-            # 断点续传握手：告诉发送方 .part 里已经有几个字节。
-            # 头是 "RESUME <总大小> <文件名>"，第三段整体就是文件名、没有偏移字段；
-            # 原来按空格 rpartition 会把 "IMG 2" 截成 "IMG"，与 UPLOAD 分支不一致。
-            name = safe_name(parts[2])
-            dest = unique_path(resolve_file_dir(name), name)
-            with part_lock_for(dest):
-                have = resume_offset(dest, name, size)
-            log("resume query: %s have %d/%d" % (name, have, size))
-            conn.sendall(("HAVE %d\n" % have).encode("utf-8"))
-            return
-
-        if parts[0] == "CLIPIMG":
-            if size > CLIPIMG_MAX_BYTES:
-                conn.sendall(b"ERR clipboard too large\n")
-                return
-            # 剪贴板图片：只进内存，不落盘。
-            # 第三段是可选文本长度；旧版客户端这里放的是文件名，解析失败按 0 处理。
-            try:
-                caption_len = int(parts[2])
-            except ValueError:
-                caption_len = 0
-            if caption_len < 0:
-                caption_len = 0
-            if caption_len > CLIPIMG_MAX_TEXT:
-                conn.sendall(b"ERR clipboard too large\n")
-                return
-
-            data = bytearray()
-            while len(data) < size:
-                chunk = stream.read(min(1 << 16, size - len(data)))
-                if not chunk:
-                    break
-                data += chunk
-            if len(data) != size:
-                log("clipboard image: incomplete (%d/%d) from %s" % (len(data), size, addr[0]))
-                conn.sendall(b"ERR incomplete\n")
-                return
-
-            caption = bytearray()
-            while len(caption) < caption_len:
-                chunk = stream.read(min(1 << 16, caption_len - len(caption)))
-                if not chunk:
-                    break
-                caption += chunk
-            text = caption.decode("utf-8", "replace")
-
-            # GTK 剪贴板只能在主循环线程里操作，这里排队过去
-            GLib.idle_add(set_clipboard_image, bytes(data), text)
-            conn.sendall(b"OK clipboard\n")
-            return
-
-        # 第四段是可选的续传偏移。文件名本身可能以「空格 + 数字」结尾（如 IMG 2），
-        # 只有确实存在匹配的断点记录时才把尾段当偏移，否则整段都当文件名。
-        raw = parts[2]
-        name, _, tail = raw.rpartition(" ")
-        offset = 0
-        if tail.isdigit():
-            candidate = safe_name(name)
-            candidate_dest = unique_path(resolve_file_dir(candidate), candidate)
-            if resume_offset(candidate_dest, candidate, size) == int(tail):
-                offset = int(tail)
-                name = candidate
-            else:
-                name = raw
-        else:
-            name = raw
-        name = safe_name(name)
-        directory = resolve_file_dir(name)
-        os.makedirs(directory, exist_ok=True)
-        dest = unique_path(directory, name)
-        temp_dest = dest + ".part"
-
-        with part_lock_for(dest):
-            if offset > 0:
-                try:
-                    have = os.path.getsize(temp_dest)
-                except OSError:
-                    have = 0
-                if have < offset or offset > size:
-                    log("file: %s 断点 %d 与本地 %d 不符，改为从头传" % (name, offset, have))
-                    offset = 0
-
-            if offset > 0:
-                log("file: %s 从 %d/%d (%d%%) 续传"
-                    % (name, offset, size, offset * 100 // max(1, size)))
-
-            started = time.time()
-            received = offset
-            last_mark = offset
-            mode = "r+b" if offset > 0 else "wb"
-            with open(temp_dest, mode) as out:
-                if offset > 0:
-                    out.seek(offset)
-                    out.truncate(offset)
-                else:
-                    try:
-                        with open(part_meta_path(dest), "w", encoding="utf-8") as meta:
-                            json.dump({"name": name, "size": size}, meta)
-                    except OSError:
-                        pass
-                while received < size:
-                    chunk = stream.read(min(1 << 18, size - received))
-                    if not chunk:
-                        break
-                    out.write(chunk)
-                    received += len(chunk)
-                    # 大文件按 25% 打点，出问题能看出断在第几段
-                    if size >= (64 << 20) and received - last_mark >= size // 4:
-                        last_mark = received
-                        log("file: %s %d%% (%d/%d MB)"
-                            % (name, received * 100 // size, received >> 20, size >> 20))
-
-            if received != size:
-                # 保留 .part 和 .part.info：下次同一个文件重发就能接着传
-                log("file: incomplete %s (%d/%d) from %s，断点已保留"
-                    % (name, received, size, addr[0]))
-                conn.sendall(b"ERR incomplete\n")
-                return
-
-            # 原子替换：要么是完整的旧文件，要么是完整的新文件，不会留下半截或副本
-            os.replace(temp_dest, dest)
-            try:
-                os.remove(part_meta_path(dest))
-            except OSError:
-                pass
-
-            elapsed = max(0.001, time.time() - started)
-            log("file <- %s (%d bytes, 本次 %d bytes, %.1f MB/s%s) -> %s"
-                % (name, size, size - offset, (size - offset) / elapsed / 1048576.0,
-                   "，续传" if offset else "", dest))
-            # 桌面提醒：接收方也要知道文件落在哪个目录，不然只能自己翻
-            _tray_notify("收到文件", "%s\n→ %s" % (name, os.path.dirname(dest)))
-            conn.sendall(("OK " + dest + "\n").encode("utf-8"))
-    except Exception as e:
-        log("file upload failed: %r" % (e,))
-        try:
-            conn.sendall(b"ERR exception\n")
-        except OSError:
-            pass
-    finally:
-        try:
-            conn.close()
-        except OSError:
-            pass
-
-
-def file_accept_loop(sock):
-    while True:
-        try:
-            conn, addr = sock.accept()
-        except OSError:
-            return
-        threading.Thread(target=handle_upload, args=(conn, addr), daemon=True).start()
 
 
 # ---------- 桌面出件箱：丢进文件夹就传到 Windows，无需额外程序 ----------
@@ -2623,53 +2368,9 @@ def desktop_dir():
 
 
 def outbox_dir():
+    if CONF.get("outbox_dir"):
+        return os.path.expanduser(CONF["outbox_dir"])
     return os.path.join(desktop_dir(), OUTBOX_NAME)
-
-
-def push_file(path, host, port):
-    size = os.path.getsize(path)
-    name = os.path.basename(path)
-    offset = 0
-
-    # 先问对端已有多少字节；旧版接收端回 ERR bad header 时按从头传走老协议。
-    # 与 Windows -> Ubuntu 方向用同一套 HAVE / UPLOAD ... <offset> 约定。
-    try:
-        probe = socket.create_connection((host, port), 5)
-        try:
-            probe.settimeout(5)
-            probe.sendall(("RESUME %d %s\n" % (size, name)).encode("utf-8"))
-            answer = probe.makefile("rb").readline(4096).decode("utf-8", "replace").strip()
-            if answer.startswith("HAVE "):
-                have = int(answer[5:].strip())
-                if 0 < have < size:
-                    offset = have
-        finally:
-            probe.close()
-    except Exception as e:
-        log("outbox resume probe failed: %r" % (e,))
-
-    sock = socket.create_connection((host, port), 5)
-    try:
-        # 只有 connect 超时不够：对端僵住时 sendall / readline 会永久占住 in-flight
-        sock.settimeout(60)
-        header = "UPLOAD %d %s" % (size, name)
-        if offset:
-            header += " %d" % offset
-        sock.sendall((header + "\n").encode("utf-8"))
-        with open(path, "rb") as source:
-            if offset:
-                source.seek(offset)
-            while True:
-                chunk = source.read(1 << 16)
-                if not chunk:
-                    break
-                sock.sendall(chunk)
-        return sock.makefile("rb").readline(4096).decode("utf-8", "replace").strip()
-    finally:
-        try:
-            sock.close()
-        except OSError:
-            pass
 
 
 OUTBOX_INFLIGHT = set()
@@ -2684,7 +2385,7 @@ def outbox_worker(path):
             return
         port = int(CONF.get("file_recv_port", 4323))
         try:
-            reply = push_file(path, peer, port)
+            reply = push_file(path, peer, port, log)
             if reply.startswith("OK"):
                 done = os.path.join(os.path.dirname(path), "已发送")
                 os.makedirs(done, exist_ok=True)
@@ -2742,7 +2443,10 @@ def start_file_server():
         log("文件端口 %d 绑定失败: %s" % (port, e))
         return
     sock.listen(4)
-    threading.Thread(target=file_accept_loop, args=(sock,), daemon=True).start()
+    receiver = FileReceiver(resolve_file_dir,
+                            lambda data, text: GLib.idle_add(set_clipboard_image, data, text),
+                            _tray_notify, log)
+    threading.Thread(target=receiver.accept_loop, args=(sock,), daemon=True).start()
     log("file server on %s:%d -> %s" % (CONF.get("bind"), port, directory))
 
 
@@ -2777,7 +2481,8 @@ def main():
         if ensure_display():
             _attach_x_watch()
             _register_hotkey()
-        GLib.timeout_add(60, _rwin_tick)
+        if CONF.get("reverse_share", True):
+            GLib.timeout_add(60, _rwin_tick)
         log("reverse share: hotkey=%s edge_entry=%s share=%s"
             % (CONF.get("hotkey"), CONF.get("edge_entry", True),
                CONF.get("reverse_share", True)))
@@ -2790,7 +2495,20 @@ def main():
     except Exception as e:
         log("outbox setup failed: %r" % (e,))
     log("listening on %s:%d" % (bind, port))
-    GLib.MainLoop().run()
+    loop = GLib.MainLoop()
+    import signal
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, lambda: (loop.quit(), False)[1])
+    try:
+        loop.run()
+    finally:
+        _leave("退出", tell_windows=True)
+        _unregister_hotkey()
+        release_mouse_buttons("exit")
+        set_pointer_visible(True)
+        for fd in list(CONNS):
+            drop(fd, "shutdown")
+        srv.close()
 
 
 if __name__ == "__main__":

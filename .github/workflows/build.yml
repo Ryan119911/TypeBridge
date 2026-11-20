@@ -32,40 +32,9 @@ jobs:
           $s2 = [regex]::Replace($s, $pattern, ('AssemblyVersion("' + $v + '.0")'))
           [System.IO.File]::WriteAllText($p, $s2, (New-Object System.Text.UTF8Encoding($true)))
 
-      - name: 编译 TypeBridge.exe
+      - name: 编译并测试 Windows 程序
         shell: pwsh
-        run: |
-          $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-          if (-not (Test-Path $csc)) {
-            throw "未找到 Windows 自带的 .NET Framework C# 编译器：$csc"
-          }
-          # 设置窗口用 WPF 编写（WpfSettings.cs），需要引用 WPF 程序集
-          $wpf = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\WPF"
-          if (-not (Test-Path (Join-Path $wpf "PresentationFramework.dll"))) {
-            $wpf = Join-Path $env:WINDIR "Microsoft.NET\Framework\v4.0.30319\WPF"
-          }
-          if (-not (Test-Path (Join-Path $wpf "PresentationFramework.dll"))) {
-            throw "未找到 WPF 程序集：$wpf"
-          }
-          $xaml = Get-ChildItem -Path "$env:WINDIR\Microsoft.NET\assembly\GAC_MSIL\System.Xaml" -Filter "System.Xaml.dll" -Recurse -ErrorAction SilentlyContinue |
-            Select-Object -First 1 -ExpandProperty FullName
-          $cscArgs = @(
-            "/nologo", "/target:winexe", "/platform:anycpu", "/optimize+", "/codepage:65001",
-            "/win32icon:assets\typebridge.ico",
-            "/out:TypeBridge.exe",
-            "/reference:System.dll",
-            "/reference:System.Drawing.dll",
-            "/reference:System.Windows.Forms.dll",
-            "/reference:System.Web.Extensions.dll",
-            "/reference:$(Join-Path $wpf 'PresentationFramework.dll')",
-            "/reference:$(Join-Path $wpf 'PresentationCore.dll')",
-            "/reference:$(Join-Path $wpf 'WindowsBase.dll')"
-          )
-          if ($xaml) { $cscArgs += "/reference:$xaml" }
-          $cscArgs += @("TypeBridge.cs", "WpfSettings.cs")
-          & $csc @cscArgs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Get-Item "TypeBridge.exe" | Select-Object FullName, Length
+        run: ./build.ps1 -Test
 
       - name: 上传 Windows 程序
         uses: actions/upload-artifact@v4
@@ -80,6 +49,12 @@ jobs:
     steps:
       - name: 检出源码
         uses: actions/checkout@v4
+
+      - name: 验证 Ubuntu 协议、文件和 X11 输入
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-gi gir1.2-gtk-3.0 xdotool xvfb x11-utils
+          /usr/bin/python3 tests/run_linux.py
 
       - name: 构建 DEB 安装包
         shell: bash
