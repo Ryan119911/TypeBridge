@@ -57,10 +57,20 @@ class MotionTests(unittest.TestCase):
     def test_center_without_warp_does_not_swallow_next_move(self):
         self.state.update(last_x=640, last_y=400)
         with mock.patch.object(self.daemon, '_warp') as warp:
-            self.daemon._center_remote_pointer(640, 400)
+            self.daemon._warp_remote_pointer(640, 400)
             warp.assert_not_called()
             self.motion(630, 400)
         self.assertEqual(self.state['dx'], -10)
+
+    def test_return_position_before_release_does_not_forward_warp(self):
+        # RP and RGW 0 may arrive in separate network reads. Motion can be
+        # processed between them, while the reverse grab is still active.
+        with mock.patch.object(self.daemon, '_warp'):
+            self.daemon.handle_line('RP 40 400', None)
+            self.motion(90, 400)  # queued before RP
+            self.motion(40, 400)  # RP acknowledgement
+            self.motion(45, 400)  # real movement before release
+        self.assertEqual(self.state['dx'], 5)
 
     def test_tick_drains_hotkey_already_buffered_by_xlib(self):
         daemon = self.daemon

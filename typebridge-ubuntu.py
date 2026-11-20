@@ -1179,7 +1179,7 @@ def _enter(reason, y_norm=None):
     # 从边缘进入时指针贴在 x=0 上，再往那边推会被屏幕边界夹住、位移全丢，
     # 表现就是「切过去了但光标不动」，然后人手往回一拨又触发了边缘切回。
     # 抓取期间指针是隐藏的，挪到中间没人看得出来，却换来了整块屏幕的移动余量。
-    _center_remote_pointer(w // 2, h // 2)
+    _warp_remote_pointer(w // 2, h // 2)
 
     set_pointer_visible(False)
 
@@ -1290,7 +1290,7 @@ def _on_x_button(ev, down):
         _send_event("RB %d up" % button)
 
 
-def _center_remote_pointer(x, y):
+def _warp_remote_pointer(x, y):
     # Xlib 保留事件顺序。warp 前可能已有多帧真实移动排队，不能只吞掉下一帧，
     # 更不能用位移大小猜测 warp，否则快速移动会丢失且到边后不再回中。
     if (x, y) == (_RWIN["last_x"], _RWIN["last_y"]):
@@ -1320,7 +1320,7 @@ def _on_x_motion(ev):
     if w and h and (x <= 3 or y <= 3 or x >= w - 4 or y >= h - 4):
         # 贴着屏幕边继续推，位移会被夹在边界上丢掉；挪回中间接着数
         cx, cy = w // 2, h // 2
-        _center_remote_pointer(cx, cy)
+        _warp_remote_pointer(cx, cy)
 
 
 def _on_x_events(fd, cond):
@@ -2165,9 +2165,7 @@ def handle_line(line, sock):
             if w and h:
                 x = max(0, min(w - 1, x))
                 y = max(0, min(h - 1, y))
-            _warp(x, y)
-            _RWIN["last_x"], _RWIN["last_y"] = x, y
-            _RWIN["ignore_motion"] = 1
+            _warp_remote_pointer(x, y)
         return True
     if line == "OPEN":
         # Windows 端托盘菜单「在 Ubuntu 上打开接收目录」
