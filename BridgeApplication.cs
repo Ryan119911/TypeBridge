@@ -72,9 +72,6 @@ namespace TypeBridgeApp
         // 托盘文案等界面动作再切回 UI 线程。
         private volatile bool remoteDrive;
         private bool reverseEnable = true;
-        private int remoteEdgePush;
-        // 刚接管时本机光标就摆在共享边上，要先往屏幕里走一段才允许"再推出去交还"
-        private bool remoteArmed;
         private DateTime remoteDriveSince;
         // 上一次"本机输入收回控制权"的时刻：同一次按键别再触发切换热键
         private DateTime localTakeoverAt;

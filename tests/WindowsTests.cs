@@ -23,6 +23,12 @@ namespace TypeBridgeApp
         [STAThread]
         private static void Main(string[] args)
         {
+            if (args.Length > 0 && args[0] == "--edge-runtime")
+            {
+                try { EdgeSwitchChecks.Run(); }
+                catch (Exception error) { Console.WriteLine(error); Environment.ExitCode = 1; }
+                return;
+            }
             if (args.Length > 0 && args[0] == "--runtime")
             {
                 try { RuntimeChecks.Run(false); }
@@ -36,6 +42,8 @@ namespace TypeBridgeApp
                 return;
             }
             List<string> lines = new List<string>();
+            try { EdgeSwitchChecks.ReverseChecks(); }
+            catch (Exception error) { Console.WriteLine(error.Message); Environment.ExitCode = 1; return; }
             LineFramer framer = new LineFramer();
             byte[] data = Encoding.UTF8.GetBytes("PING\nC \"中文🙂\"\r\n\nRM 10 -4\n");
             foreach (byte value in data) framer.Feed(new byte[] { value }, 1, lines.Add);

@@ -105,8 +105,6 @@ namespace TypeBridgeApp
             RemoteInput.ReleaseAll();
             mouseHook.ReleaseAll();
             mouseHook.RestoreCursor();
-            remoteEdgePush = 0;
-            remoteArmed = false;
             remoteDrive = true;
             remoteDriveSince = DateTime.UtcNow;
             // 接管期间关掉本机的边缘侦测：否则真实鼠标蹭到边上会再切去 Ubuntu，两边打架
@@ -175,8 +173,6 @@ namespace TypeBridgeApp
 
             if (tellUbuntu && stream != null)
                 SendLine("RGW 0");
-            remoteEdgePush = 0;
-            remoteArmed = false;
             mouseHook.Watching = edgeSwitch && stream != null && !mouseMode;
             // 交还时本机光标往往还压在共享边上：真实鼠标一动就会又被边缘切走，
             // 表现成「刚交还就自己切回 Ubuntu」。主动挪进来一点，和切回逻辑一致。
@@ -224,42 +220,21 @@ namespace TypeBridgeApp
         private void OnRemoteMouseMove(int dx, int dy)
         {
             RemoteInput.MoveBy(dx, dy);
+            if (ShouldReturnRemoteMouse(dx, dy, Screen.PrimaryScreen.Bounds, Cursor.Position, DateTime.UtcNow))
+                ReturnToUbuntuByEdge();
+        }
+
+        private bool ShouldReturnRemoteMouse(int dx, int dy, Rectangle b, Point p, DateTime now)
+        {
             if (!edgeSwitch)
-                return;
+                return false;
             // 刚接管的头 400ms 不做"外推交还"判定：对端进入时会把它自己的指针挪到屏幕中心，
             // 那次 warp 的位移偶尔会和人的动作抢顺序，算出一个几百像素的假位移，
             // 瞬间把光标甩到边缘 → 刚切过来就切回去。给一段静默期兜住。
-            if ((DateTime.UtcNow - remoteDriveSince).TotalMilliseconds < 400)
-                return;
-
-            Rectangle b = Screen.PrimaryScreen.Bounds;
-            Point p = Cursor.Position;
-            // 接管时指针就摆在共享边上：先往屏幕里走够 80px 才算就绪。
-            // 少了这道就绪条件，推过来时手还在往外带（或随手往回拨一下），
-            // 几十像素就凑满阈值 -> 立刻交还，表现就是「刚切过去就弹回来」。
-            int inside;
-            switch (switchEdge)
-            {
-                case "left":
-                    inside = p.X - b.Left;
-                    break;
-                case "top":
-                    inside = p.Y - b.Top;
-                    break;
-                case "bottom":
-                    inside = b.Bottom - 1 - p.Y;
-                    break;
-                default:
-                    inside = b.Right - 1 - p.X;
-                    break;
-            }
-            if (!remoteArmed)
-            {
-                remoteEdgePush = 0;
-                if (inside >= 80)
-                    remoteArmed = true;
-                return;
-            }
+            if ((now - remoteDriveSince).TotalMilliseconds < 400)
+                return false;
+            // 静默期结束后只看是否向共享边外推，不要求先向内走 80px，
+            // 也不能把大位移当成 warp：RM 是对端合并后的位移，快推可远超 60px。
             bool pushing;
             switch (switchEdge)
             {
@@ -276,24 +251,7 @@ namespace TypeBridgeApp
                     pushing = p.X >= b.Right - 1 && dx > 0;
                     break;
             }
-            if (!pushing)
-            {
-                remoteEdgePush = 0;
-                return;
-            }
-            int step = Math.Max(Math.Abs(dx), Math.Abs(dy));
-            // 单帧几十像素的跳变只可能来自 warp（对端进入时把指针居中），
-            // 不是人手在推；直接丢弃并清零，否则一次跳变就能凑满阈值、刚接管就切回。
-            if (step > 60)
-            {
-                remoteEdgePush = 0;
-                return;
-            }
-            remoteEdgePush += step;
-            if (remoteEdgePush < 50)
-                return;
-            remoteEdgePush = 0;
-            ReturnToUbuntuByEdge();
+            return pushing;
         }
 
         /// <summary>把控制权交回 Ubuntu，并把它的指针放到共享边内侧，接着就能继续用。</summary>

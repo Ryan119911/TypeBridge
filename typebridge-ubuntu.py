@@ -769,7 +769,7 @@ _RWIN = {
     "dy": 0,
     "last_x": 0,
     "last_y": 0,
-    "ignore_motion": 0,    # 刚 warp 过，下一个 motion 只用来对齐坐标
+    "warp_target": None,   # 等待本进程 warp 的目标事件，丢弃其之前排队的旧坐标
     "entry": (0, 0),
     "win_owns": False,     # Windows 正把键鼠送到本机（OWN 1），此时不许反向接管
 }
@@ -1171,7 +1171,7 @@ def _enter(reason, y_norm=None):
 
     _RWIN.update(active=True, confirmed=False, deadline=time.time() + 1.5,
                  sock=sock, sw=w, sh=h, down=set(), buttons=set(),
-                 dx=0, dy=0, last_x=x, last_y=y, ignore_motion=0, entry=(x, y))
+                 dx=0, dy=0, last_x=x, last_y=y, warp_target=None, entry=(x, y))
     _EDGE["since"] = 0.0
     if y_norm is None:
         y_norm = int(round(65535.0 * y / max(1, h - 1)))
@@ -1179,9 +1179,7 @@ def _enter(reason, y_norm=None):
     # 从边缘进入时指针贴在 x=0 上，再往那边推会被屏幕边界夹住、位移全丢，
     # 表现就是「切过去了但光标不动」，然后人手往回一拨又触发了边缘切回。
     # 抓取期间指针是隐藏的，挪到中间没人看得出来，却换来了整块屏幕的移动余量。
-    _warp(w // 2, h // 2)
-    _RWIN["last_x"], _RWIN["last_y"] = w // 2, h // 2
-    _RWIN["ignore_motion"] = 1
+    _center_remote_pointer(w // 2, h // 2)
 
     set_pointer_visible(False)
 
@@ -1213,7 +1211,7 @@ def _leave(reason, tell_windows=True, warp=True):
     # 交还后的 0.5 秒内忽略热键：X 的自动重复/按键释放顺序会让同一次按压
     # 再触发一次 _enter，表现就是「刚按完又自己切回去」。
     _HOT["cooldown"] = time.time() + 0.5
-    _RWIN.update(active=False, confirmed=False, sock=None, deadline=0.0)
+    _RWIN.update(active=False, confirmed=False, sock=None, deadline=0.0, warp_target=None)
     # 交还后先别急着允许边缘再进：指针还压在边上，否则会立刻又切走
     _EDGE["since"] = 0.0
     _EDGE["armed"] = False
@@ -1292,21 +1290,29 @@ def _on_x_button(ev, down):
         _send_event("RB %d up" % button)
 
 
+def _center_remote_pointer(x, y):
+    # Xlib 保留事件顺序。warp 前可能已有多帧真实移动排队，不能只吞掉下一帧，
+    # 更不能用位移大小猜测 warp，否则快速移动会丢失且到边后不再回中。
+    if (x, y) == (_RWIN["last_x"], _RWIN["last_y"]):
+        return
+    _RWIN["warp_target"] = (x, y)
+    _warp(x, y)
+    _RWIN["last_x"], _RWIN["last_y"] = x, y
+
+
 def _on_x_motion(ev):
     if not _RWIN["active"]:
         return
     x, y = ev.x_root, ev.y_root
-    if _RWIN["ignore_motion"]:
-        _RWIN["ignore_motion"] = 0
-        _RWIN["last_x"], _RWIN["last_y"] = x, y
+    target = _RWIN["warp_target"]
+    if target is not None:
+        if (x, y) == target:
+            _RWIN["warp_target"] = None
+            _RWIN["last_x"], _RWIN["last_y"] = x, y
         return
     dx = x - _RWIN["last_x"]
     dy = y - _RWIN["last_y"]
     _RWIN["last_x"], _RWIN["last_y"] = x, y
-    # 单帧跳几百像素必然是 warp（进入时居中 / 贴边回中）留下的位移，不是人手动作。
-    # 这种假位移会瞬间把对端光标甩到屏幕边缘并触发"边缘切回"——只对齐坐标，不转发。
-    if abs(dx) > 80 or abs(dy) > 80:
-        return
     if dx or dy:
         _RWIN["dx"] += dx
         _RWIN["dy"] += dy
@@ -1314,9 +1320,7 @@ def _on_x_motion(ev):
     if w and h and (x <= 3 or y <= 3 or x >= w - 4 or y >= h - 4):
         # 贴着屏幕边继续推，位移会被夹在边界上丢掉；挪回中间接着数
         cx, cy = w // 2, h // 2
-        _warp(cx, cy)
-        _RWIN["last_x"], _RWIN["last_y"] = cx, cy
-        _RWIN["ignore_motion"] = 1
+        _center_remote_pointer(cx, cy)
 
 
 def _on_x_events(fd, cond):
@@ -1440,6 +1444,11 @@ def _register_hotkey():
 def _rwin_tick():
     if not CONF.get("reverse_share", True):
         return True
+    # XQueryPointer / XSync 可把事件读进 Xlib 缓冲区，导致连接 fd 已不可读，
+    # GLib 的 IO watch 再也收不到通知。每次已有的周期回调也排空这些事件，
+    # 否则热键、warp 回执和真实移动会一直等到下一次无关 X 流量才被处理。
+    if _DPY and _xcap_ready():
+        _on_x_events(None, None)
     if _HOT["code"] == 0 and time.time() - _HOT["tried"] > 15:
         if ensure_display():
             _attach_x_watch()

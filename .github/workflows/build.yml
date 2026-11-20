@@ -36,6 +36,10 @@ jobs:
         shell: pwsh
         run: ./build.ps1 -Test
 
+      - name: 验证边缘切换回调
+        shell: pwsh
+        run: ./tests/Run-DesktopChecks.ps1 -Executable ./TypeBridge.Tests.exe -Argument --edge-runtime
+
       - name: 上传 Windows 程序
         uses: actions/upload-artifact@v4
         with:
@@ -62,7 +66,7 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             export VERSION="${GITHUB_REF_NAME#v}"
           else
-            export VERSION="3.8.0"
+            export VERSION="3.8.1"
           fi
           bash ubuntu/build-deb.sh
 

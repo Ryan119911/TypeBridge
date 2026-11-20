@@ -126,6 +126,17 @@ class DaemonTests(unittest.TestCase):
         self.peer.send('RGW 0')
         time.sleep(.6)
 
+    def test_reverse_fast_motion_and_recenter(self):
+        self.start_reverse()
+        # A genuine fast stroke may exceed both old 80px/60px heuristics.
+        # Drive the real X server, event loop and control socket together.
+        subprocess.run(['xdotool', 'mousemove', '--sync', '0', '400'], check=True)
+        self.assertEqual(self.peer.until('RM '), 'RM -640 0')
+        subprocess.run(['xdotool', 'mousemove_relative', '--sync', '--', '-10', '0'], check=True)
+        self.assertEqual(self.peer.until('RM '), 'RM -10 0')
+        self.peer.send('RGW 0')
+        time.sleep(.6)
+
     def test_reverse_disconnect_releases_grab(self):
         self.start_reverse()
         self.peer.close()

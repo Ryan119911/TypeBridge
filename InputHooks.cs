@@ -718,8 +718,9 @@ namespace TypeBridgeApp
         private bool edgeArmed = true;
         private int edgeHits;
         private int edgeCooldownUntil;
-        // 刚切进 Ubuntu 时贴着共享边，要先往屏幕里走一段才允许"再推出去回来"
+        // 入场后短暂防抖；走进屏幕内部可提前解除，超时也必须允许返回。
         private bool edgeReturnArmed;
+        private int trackingStartedTick;
         private int virtualX;
         private int virtualY;
         private string switchEdge = "right";
@@ -822,6 +823,7 @@ namespace TypeBridgeApp
             tracking = true;
             edgeArmed = false;
             edgeReturnArmed = false;
+            trackingStartedTick = Environment.TickCount;
         }
 
         /// <summary>
@@ -1131,10 +1133,10 @@ namespace TypeBridgeApp
                             {
                                 virtualX += dx;
                                 virtualY += dy;
-                                // 刚切进 Ubuntu 时是贴着共享边进来的（进来点只离边 48px）：
-                                // 先得往屏幕里走够 100px 才算就绪，之后往外推才是"要回 Windows"。
-                                // 没有这道就绪条件，推过去时手一抖往回带几十像素就会立刻弹回去。
-                                if (!edgeReturnArmed && InsideDistance() >= 100)
+                                // 入场抖动只短暂抑制。原来必须先走到 100px 内侧，
+                                // 在共享边附近操作的人会永远无法往回切。
+                                if (!edgeReturnArmed && (InsideDistance() >= 100
+                                    || unchecked(Environment.TickCount - trackingStartedTick) >= 300))
                                     edgeReturnArmed = true;
                                 // 位置判定：光标推到「和 Windows 相接的那条边」就切回，
                                 // 和 Windows 自己的多屏切换一致——不要求推得快，推到边上就算。
