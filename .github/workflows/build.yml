@@ -62,7 +62,7 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             export VERSION="${GITHUB_REF_NAME#v}"
           else
-            export VERSION="3.7.9"
+            export VERSION="3.8.0"
           fi
           bash ubuntu/build-deb.sh
 
