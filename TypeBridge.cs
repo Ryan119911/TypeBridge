@@ -14,7 +14,6 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("TypeBridge")]
 [assembly: AssemblyDescription("Windowless Windows to Ubuntu keyboard and mouse bridge")]
 [assembly: AssemblyProduct("TypeBridge")]
-[assembly: AssemblyVersion("3.8.1.0")]
 
 namespace TypeBridgeApp
 {
@@ -59,6 +58,11 @@ namespace TypeBridgeApp
             try
             {
                 string[] commandLine = Environment.GetCommandLineArgs();
+                if (commandLine.Length >= 2 && commandLine[1] == "--uninstall")
+                {
+                    RunUninstaller();
+                    return;
+                }
                 if (commandLine.Length >= 3 && commandLine[1] == "--send")
                 {
                     // 命令行发文件：给脚本/自动化留的口子，也方便不碰托盘直接传
@@ -137,6 +141,55 @@ namespace TypeBridgeApp
             if (list.Count == 0)
                 list.Add("127.0.0.1");
             return list.ToArray();
+        }
+
+        /// <summary>
+        /// --uninstall：卸载入口。会先清快捷方式、开机自启和卸载信息，再删安装目录。
+        /// 程序正在安装目录里运行时交给临时脚本延时删除，所以这里不要弹"卸载完成"再等用户点确定。
+        /// </summary>
+        private static void RunUninstaller()
+        {
+            try { SetProcessDPIAware(); } catch { }
+            string exe = WindowsInstall.CurrentExecutable;
+            InstallLayout layout = WindowsInstall.LayoutFor(exe);
+            if (!WindowsInstall.IsInstalledAt(exe, layout))
+            {
+                MessageBox.Show(
+                    "没有找到通过安装程序安装的 TypeBridge。\r\n\r\n"
+                        + "如果只是免安装使用，直接删除程序文件即可。",
+                    "卸载 TypeBridge",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            if (MessageBox.Show(
+                    "确定要卸载 TypeBridge 吗？\r\n\r\n"
+                        + "会删除开始菜单和桌面快捷方式、开机启动项，以及安装目录中的程序文件。",
+                    "卸载 TypeBridge",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning,
+                    MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                return;
+
+            if (WindowsInstall.IsAnotherInstanceRunning())
+            {
+                if (MessageBox.Show(
+                        "卸载前需要关闭正在运行的 TypeBridge。\r\n\r\n现在关闭并继续卸载吗？",
+                        "卸载 TypeBridge",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question,
+                        MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                    return;
+                WindowsInstall.StopOtherInstances();
+            }
+
+            string error;
+            if (!WindowsInstall.Uninstall(layout, exe, out error))
+            {
+                MessageBox.Show("卸载失败：" + error, "卸载 TypeBridge",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
 
         /// <summary>

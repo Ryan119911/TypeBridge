@@ -18,6 +18,24 @@ New-Item -ItemType Directory -Path (Split-Path $Output) -Force | Out-Null
 & $compiler @arguments /target:winexe "/win32icon:$PSScriptRoot\assets\typebridge.ico" "/out:$Output" @sources
 if ($LASTEXITCODE -ne 0) { throw 'Windows compilation failed' }
 Get-Item $Output | Select-Object FullName, Length
+
+# 独立安装程序：把刚编译好的主程序作为内嵌资源打包，发布时只需分发 TypeBridgeSetup.exe
+$setupOutput = Join-Path (Split-Path $Output) 'TypeBridgeSetup.exe'
+$setupSources = @(
+    (Join-Path $PSScriptRoot 'AssemblyInfo.cs'),
+    (Join-Path $PSScriptRoot 'WindowsInstall.cs'),
+    (Join-Path $PSScriptRoot 'WpfUi.cs'),
+    (Join-Path $PSScriptRoot 'setup\WpfInstallWindow.cs'),
+    (Join-Path $PSScriptRoot 'setup\SetupProgram.cs')
+)
+& $compiler @arguments /target:winexe "/win32icon:$PSScriptRoot\assets\typebridge.ico" `
+    "/resource:$Output,TypeBridge.exe" "/out:$setupOutput" @setupSources
+if ($LASTEXITCODE -ne 0) { throw 'Setup compilation failed' }
+$setup = Get-Item $setupOutput
+$app = Get-Item $Output
+if ($setup.Length -le $app.Length) { throw 'Setup does not contain the embedded application' }
+$setup | Select-Object FullName, Length
+
 if ($Test) {
     $testOutput = Join-Path (Split-Path $Output) 'TypeBridge.Tests.exe'
     $testSources = @(Get-ChildItem "$PSScriptRoot\tests" -Filter '*.cs' | ForEach-Object { $_.FullName })

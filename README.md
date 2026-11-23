@@ -75,12 +75,14 @@ TypeBridge 让 Windows 上的输入直接进入 Ubuntu 当前窗口：键盘、�
 - 托盘图标显示当前状态（在哪一侧、是否连接、往返延迟），右键可切换、发送文件、打开设置。
 - 设置窗口可改地址、端口、快捷键、屏幕排列、文件目录，保存即生效。
 - 键盘与鼠标可**联动**（一个键一起切），也可**分开**（两个快捷键各管一边，适合鼠标在 Windows 查资料、键盘在 Ubuntu 输入）。
+- **安装版**：独立的 `TypeBridgeSetup.exe` 会把程序装到固定目录并自动注册开始菜单，桌面快捷方式和开机自启可在安装时勾选；装好后也能在设置页「开机与快捷方式」里随时改。
 
 ## 安装
 
 ### 下载
 
-- Windows：`TypeBridge.exe`（免安装）
+- Windows 安装版：`TypeBridgeSetup.exe`（推荐，自动注册开始菜单）
+- Windows 免安装：`TypeBridge.exe`（单文件直接运行）
 - Ubuntu：`typebridge_<版本>_all.deb`
 - 最新版本：<https://github.com/Ryan119911/TypeBridge/releases/latest>
 
@@ -161,13 +163,44 @@ Ubuntu 端配置在 `~/.config/typebridge/config.json`：
 
 ### Windows 端
 
-1. 下载 `TypeBridge.exe`，双击运行，免安装。
-2. 首次启动会弹出设置窗口，填**你自己的 Ubuntu 地址和端口**。
-3. 之后右键托盘图标 →「设置...」可随时修改。
+两种用法选一种：
+
+1. **安装版（推荐）**：下载 `TypeBridgeSetup.exe`，双击运行，按提示选择安装位置和选项。开始菜单快捷方式会自动注册。
+2. **免安装**：下载 `TypeBridge.exe`，双击直接运行。
+
+第一次启动都会弹出设置窗口，填**你自己的 Ubuntu 地址和端口**；之后右键托盘图标 →「设置...」可随时修改。
 
 依赖只有系统自带的 .NET Framework 4.x，不需要额外安装运行时。
 
 如果 Windows Terminal 或其他目标程序以管理员权限运行，请在 TypeBridge 托盘菜单选择「以管理员权限重启（兼容管理员终端）」并确认 Windows 授权提示。托盘显示「管理员模式已开启」后，再使用热键或屏幕边缘切换。Windows 的权限隔离会限制普通权限程序对管理员窗口的输入操作。
+
+### Windows 安装版
+
+`TypeBridgeSetup.exe` 是独立安装程序，主程序已经打包在里面，不需要和 `TypeBridge.exe` 放在一起。
+
+安装时可以选择：
+
+- **安装位置**：默认 `%LOCALAPPDATA%\Programs\TypeBridge`，只装给当前用户，不需要管理员权限；
+- **开机自动启动**：登录 Windows 后自动在托盘运行，不用每次手动打开；
+- **创建桌面快捷方式**：在桌面放一个 TypeBridge 图标。
+
+**开始菜单快捷方式在安装时自动注册**，之后在开始菜单搜索 TypeBridge 就能打开，也会出现在「设置 → 应用」的已安装列表里。
+
+重装或升级会覆盖程序文件，但**保留安装目录里已有的 `typebridge.ini`**，地址和快捷键不会丢。安装包旁边如果放了 `typebridge.ini`，首次安装会一并复制过去，适合批量部署。
+
+装好之后，设置页最下面的「开机与快捷方式」卡片可以随时开关开机自启、桌面快捷方式和开始菜单快捷方式。免安装运行时这张卡片管理的是当前 exe 的集成状态；想要固定位置和开始菜单，用安装版。
+
+卸载：托盘右键 →「卸载 TypeBridge...」，或 Windows「设置 → 应用 → 已安装的应用」里找到 TypeBridge。卸载会删除开始菜单/桌面快捷方式、开机启动项，以及安装目录中的程序文件。
+
+### 命令行
+
+| 命令 | 作用 |
+|---|---|
+| `TypeBridgeSetup.exe` | 安装到本机（独立安装程序） |
+| `TypeBridge.exe --uninstall` | 卸载已安装的副本（Windows「设置 → 应用」用的也是它） |
+| `TypeBridge.exe --send "D:\big.iso"` | 直接发送文件，可一次跟多个 |
+
+`--autostart` 由开机启动项自动带上，手动运行不需要。
 
 ### 两边怎么连
 
@@ -247,6 +280,8 @@ Windows 端配置在 EXE 同目录的 `typebridge.ini`，设置窗口保存时�
 
 **快捷键怎么设**：在设置里点输入框、直接按下想要的组合键即可，不需要记写法。必须带 Ctrl / Alt / Shift 之一；想用一个不会和任何软件冲突的整键，可以单独用 `ScrollLock`、`Pause` 或 `Menu`（在设置里按对应键即可）。
 
+开机自启和快捷方式属于 Windows 系统状态（`HKCU\...\Run` 与开始菜单/桌面的 `.lnk`），不写进 `typebridge.ini`；在设置页「开机与快捷方式」里改即可。
+
 ## 安全提示
 
 TypeBridge 走**明文 TCP，没有内置认证或加密**，安全边界完全依赖网络环境：
@@ -277,7 +312,7 @@ Windows 端使用全局键盘/鼠标钩子：只在 Ubuntu 模式下拦截并转
 
 推 `main` 由 GitHub Actions 产出 EXE 与 DEB；推 `v*` 标签自动创建 Release。
 
-本地构建：Windows 双击 `build.bat`（用系统自带 .NET Framework，不需要 Visual Studio）；Ubuntu 上 `VERSION=<版本> bash ubuntu/build-deb.sh`，产物在 `dist/`。
+本地构建：Windows 双击 `build.bat`（用系统自带 .NET Framework，不需要 Visual Studio），会同时产出 `TypeBridge.exe` 和 `TypeBridgeSetup.exe`（安装器把主程序内嵌在里面）；Ubuntu 上 `VERSION=<版本> bash ubuntu/build-deb.sh`，产物在 `dist/`。
 
 Windows 回归测试运行 `powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1 -Test`。
 Ubuntu 回归测试运行 `python3 tests/run_linux.py`，需要 `xvfb`、`x11-utils` 以及正常运行所需的 GTK 和 xdotool。测试在独立的 X11 显示 `:97` 中运行。

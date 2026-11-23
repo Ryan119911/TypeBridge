@@ -26,6 +26,8 @@ namespace TypeBridgeApp
         private readonly ToolStripMenuItem mouseToggleItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem settingsItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem administratorItem = new ToolStripMenuItem();
+        private readonly ToolStripSeparator integrationSeparator = new ToolStripSeparator();
+        private readonly ToolStripMenuItem uninstallItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem sendFileItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem openRemoteDirItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem dropPadItem = new ToolStripMenuItem();
@@ -167,6 +169,7 @@ namespace TypeBridgeApp
                 ? "管理员模式已开启" : "以管理员权限重启（兼容管理员终端）";
             administratorItem.Enabled = !AdministratorMode.IsEnabled;
             administratorItem.Click += delegate { RestartAsAdministrator(); };
+            uninstallItem.Click += delegate { ConfirmUninstall(); };
             sendFileItem.Text = "发送文件到 Ubuntu...";
             sendFileItem.Click += delegate { SendFilesDialog(); };
             openRemoteDirItem.Text = "在 Ubuntu 上打开接收目录";
@@ -191,7 +194,11 @@ namespace TypeBridgeApp
             trayMenu.Items.Add(dropPadItem);
             trayMenu.Items.Add(settingsItem);
             trayMenu.Items.Add(administratorItem);
+            trayMenu.Items.Add(integrationSeparator);
+            trayMenu.Items.Add(uninstallItem);
             trayMenu.Items.Add(exitItem);
+            trayMenu.Opening += delegate { RefreshIntegrationMenu(); };
+            RefreshIntegrationMenu();
 
             tray.ContextMenuStrip = trayMenu;
             tray.Icon = appIcon;
@@ -230,7 +237,19 @@ namespace TypeBridgeApp
             ApplyHotkeys();
             SetKeyboardMode(false, false);
             SetMouseMode(false, false);
-            ShowHotkeyTip();
+            // 开机自启时不弹"已启动"气泡，免得上电就多一个提示
+            bool autoStarted = false;
+            foreach (string argument in Environment.GetCommandLineArgs())
+            {
+                if (string.Equals(argument, WindowsInstall.AutoStartArgument,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    autoStarted = true;
+                    break;
+                }
+            }
+            if (!autoStarted)
+                ShowHotkeyTip();
             if (!configLoaded)
             {
                 // 首次运行：等消息循环真正跑起来再弹设置窗口。
@@ -265,6 +284,48 @@ namespace TypeBridgeApp
                     Log.Write("administrator restart failed: " + error.Message);
                     ShowTrayTip("管理员模式启动失败", error.Message);
                 }
+            }
+        }
+
+        /// <summary>托盘菜单里的安装项：已安装时文案变成"重新安装"，卸载项只在安装后显示。</summary>
+        private void RefreshIntegrationMenu()
+        {
+            string exe = Application.ExecutablePath;
+            bool installed = WindowsInstall.IsInstalledAt(exe, WindowsInstall.LayoutFor(exe));
+            uninstallItem.Visible = installed;
+            integrationSeparator.Visible = installed;
+        }
+
+        private void ConfirmUninstall()
+        {
+            if (MessageBox.Show(
+                    "确定要卸载 TypeBridge 吗？\r\n\r\n"
+                        + "会删除开始菜单和桌面快捷方式、开机启动项，以及安装目录中的程序文件。",
+                    "卸载 TypeBridge",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning,
+                    MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                return;
+
+            string exe = Application.ExecutablePath;
+            InstallLayout layout = WindowsInstall.LayoutFor(exe);
+            string error;
+            if (!WindowsInstall.Uninstall(layout, exe, out error))
+            {
+                MessageBox.Show("卸载失败：" + error, "卸载 TypeBridge",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            // 安装目录由临时脚本延时删除，这里立刻退出，别让用户点"确定"把删除拖过等待窗口
+            ExitThread();
+        }
+
+        private static void EnsureWpfApplication()
+        {
+            if (System.Windows.Application.Current == null)
+            {
+                System.Windows.Application wpfApp = new System.Windows.Application();
+                wpfApp.ShutdownMode = System.Windows.ShutdownMode.OnExplicitShutdown;
             }
         }
 
@@ -421,11 +482,7 @@ namespace TypeBridgeApp
             EndRemoteDrive("打开设置", true);
             settingsOpen = true;
 
-            if (System.Windows.Application.Current == null)
-            {
-                System.Windows.Application wpfApp = new System.Windows.Application();
-                wpfApp.ShutdownMode = System.Windows.ShutdownMode.OnExplicitShutdown;
-            }
+            EnsureWpfApplication();
             bool resumeKeyboard = keyboardMode;
             bool resumeMouse = mouseMode;
 
@@ -443,9 +500,12 @@ namespace TypeBridgeApp
 
             try
             {
+                IntegrationState integration = WindowsInstall.ReadState(
+                    Application.ExecutablePath,
+                    WindowsInstall.LayoutFor(Application.ExecutablePath));
                 WpfSettingsWindow form = new WpfSettingsWindow(
                     ip, port, keyboardHotkey, mouseHotkey, linkMouse, edgeSwitch, switchEdge,
-                    recvDir, remoteDir, firstRun, layoutOffset, reverseEnable);
+                    recvDir, remoteDir, firstRun, layoutOffset, reverseEnable, integration);
                 {
                     if (form.ShowDialog() != true)
                         return;

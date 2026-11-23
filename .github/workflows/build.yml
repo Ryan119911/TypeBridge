@@ -1,4 +1,4 @@
-name: 构建 TypeBridge
+﻿name: 构建 TypeBridge
 
 on:
   workflow_dispatch:
@@ -23,7 +23,7 @@ jobs:
         run: |
           $v = "${{ github.ref_name }}".TrimStart('v')
           if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "tag 不是版本号：$v" }
-          $p = "TypeBridge.cs"
+          $p = "AssemblyInfo.cs"
           $s = [System.IO.File]::ReadAllText($p)
           $pattern = 'AssemblyVersion\("\d+\.\d+\.\d+\.\d+"\)'
           # 不能用「替换前后字符串是否相同」判断有没有匹配：源码版本与 tag 一致时
@@ -44,7 +44,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: TypeBridge-windows
-          path: TypeBridge.exe
+          path: |
+            TypeBridge.exe
+            TypeBridgeSetup.exe
           if-no-files-found: error
 
   ubuntu-deb:
@@ -66,7 +68,7 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             export VERSION="${GITHUB_REF_NAME#v}"
           else
-            export VERSION="3.8.1"
+            export VERSION="3.8.2"
           fi
           bash ubuntu/build-deb.sh
 
@@ -95,4 +97,5 @@ jobs:
         with:
           files: |
             release-assets/TypeBridge.exe
+            release-assets/TypeBridgeSetup.exe
             release-assets/typebridge_*.deb

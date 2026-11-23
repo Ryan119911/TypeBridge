@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Threading;
+using Microsoft.Win32;
 
 namespace TypeBridgeApp
 {
@@ -89,6 +90,89 @@ namespace TypeBridgeApp
             Check(restart.Verb == "runas" && restart.UseShellExecute, "restart requests Windows elevation");
             Check(restart.FileName == @"C:\Type Bridge\TypeBridge.exe" && restart.WorkingDirectory == @"C:\Type Bridge", "restart retains executable and config location");
             Check(restart.Arguments == "--wait-for-exit", "elevated child waits for the old instance");
+
+            // ---- 安装 / 快捷方式 / 开机自启 ----
+            Check(WindowsInstall.ExecutableFromCommand(
+                    "\"C:\\Program Files\\TypeBridge\\TypeBridge.exe\" --autostart")
+                == @"C:\Program Files\TypeBridge\TypeBridge.exe", "autostart command path");
+            Check(!WindowsInstall.PathsEqual(@"C:\TypeBridge", @"C:\TypeBridge\sub"),
+                "path equality rejects children");
+            Check(WindowsInstall.AutoStartCommand(@"C:\A B\TypeBridge.exe")
+                == "\"C:\\A B\\TypeBridge.exe\" --autostart", "autostart command quoting");
+
+            string installRoot = Path.Combine(Path.GetTempPath(),
+                "typebridge-install-" + Guid.NewGuid().ToString("N"));
+            string registryRoot = @"Software\TypeBridgeTests\" + Guid.NewGuid().ToString("N");
+            try
+            {
+                string sourceDir = Path.Combine(installRoot, "download");
+                Directory.CreateDirectory(sourceDir);
+                string sourceExe = Path.Combine(sourceDir, "TypeBridge.exe");
+                File.WriteAllBytes(sourceExe, new byte[] { 77, 90, 1, 2, 3 });
+                File.WriteAllText(Path.Combine(sourceDir, "typebridge.ini"), "ip=10.0.0.1\r\nport=4321");
+
+                InstallLayout layout = new InstallLayout
+                {
+                    InstallDir = Path.Combine(installRoot, "app"),
+                    StartMenuDir = Path.Combine(installRoot, "start-menu"),
+                    DesktopDir = Path.Combine(installRoot, "desktop"),
+                    RunKeyPath = registryRoot + @"\Run",
+                    UninstallKeyPath = registryRoot + @"\Uninstall",
+                    ValueName = "TypeBridgeTest"
+                };
+
+                string installed = null;
+                string error = null;
+                Check(WindowsInstall.Install(sourceExe, layout, true, true, out installed, out error),
+                    "install completes: " + error);
+                Check(WindowsInstall.PathsEqual(installed, layout.ExecutablePath), "install target path");
+                Check(File.Exists(layout.ExecutablePath), "installed executable");
+                Check(File.Exists(Path.Combine(layout.InstallDir, "typebridge.ini")), "config carried over");
+                Check(File.Exists(layout.StartMenuShortcut), "start menu shortcut");
+                Check(File.Exists(layout.DesktopShortcut), "desktop shortcut");
+                Check(WindowsInstall.PathsEqual(
+                        WindowsInstall.ReadShortcutTarget(layout.StartMenuShortcut), layout.ExecutablePath),
+                    "shortcut points at installed exe");
+                Check(WindowsInstall.IsAutoStartFor(
+                        layout.ExecutablePath, layout.RunKeyPath, layout.ValueName),
+                    "autostart registered");
+                Check(WindowsInstall.IsInstalledAt(layout.ExecutablePath, layout),
+                    "uninstall entry registered");
+
+                // 重装不覆盖用户配置，并落实"不勾桌面快捷方式"
+                File.WriteAllText(Path.Combine(layout.InstallDir, "typebridge.ini"), "ip=192.168.1.5");
+                Check(WindowsInstall.Install(sourceExe, layout, false, false, out installed, out error),
+                    "reinstall: " + error);
+                Check(File.ReadAllText(Path.Combine(layout.InstallDir, "typebridge.ini")) == "ip=192.168.1.5",
+                    "reinstall keeps user config");
+                Check(!File.Exists(layout.DesktopShortcut), "unchecked desktop shortcut is removed");
+                Check(!WindowsInstall.IsAutoStartFor(
+                        layout.ExecutablePath, layout.RunKeyPath, layout.ValueName),
+                    "autostart can be turned off");
+
+                // 卸载只清自己放进去的文件，用户目录里的其他文件必须留下
+                File.WriteAllText(Path.Combine(layout.InstallDir, "keep.txt"), "user data");
+                Check(WindowsInstall.Uninstall(layout, sourceExe, out error),
+                    "uninstall: " + error);
+                Check(!File.Exists(layout.ExecutablePath), "uninstall removes executable");
+                Check(File.Exists(Path.Combine(layout.InstallDir, "keep.txt")),
+                    "uninstall keeps unrelated files");
+                Check(Directory.Exists(layout.InstallDir), "non-empty folder is kept");
+                Check(!File.Exists(layout.StartMenuShortcut) && !File.Exists(layout.DesktopShortcut),
+                    "shortcuts removed");
+                Check(WindowsInstall.ReadAutoStart(layout.RunKeyPath, layout.ValueName) == null,
+                    "autostart removed");
+                Check(!WindowsInstall.IsInstalledAt(layout.ExecutablePath, layout),
+                    "uninstall entry removed");
+            }
+            finally
+            {
+                try { Registry.CurrentUser.DeleteSubKeyTree(@"Software\TypeBridgeTests", false); }
+                catch { }
+                try { if (Directory.Exists(installRoot)) Directory.Delete(installRoot, true); }
+                catch { }
+            }
+
             Console.WriteLine("PASS " + assertions + " Windows assertions");
         }
     }

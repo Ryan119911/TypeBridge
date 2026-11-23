@@ -10,6 +10,7 @@ using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
 using System.Windows.Shapes;
 using System.Windows.Shell;
+using Switch = TypeBridgeApp.WpfUi.Switch;
 
 namespace TypeBridgeApp
 {
@@ -18,11 +19,12 @@ namespace TypeBridgeApp
     /// </summary>
     internal sealed class WpfSettingsWindow : Window
     {
-        private static readonly Color Ink = Color.FromRgb(16, 22, 34);
-        private static readonly Color Sub = Color.FromRgb(82, 96, 118);
-        private static readonly Color Line = Color.FromRgb(230, 236, 246);
-        private static readonly Color FieldBg = Color.FromRgb(246, 249, 254);
-        private static readonly Color Accent = Color.FromRgb(61, 126, 240);
+        // 共享控件的颜色与工厂在 WpfUi；这里保留短名，设置页里的大量调用不用改
+        private static readonly Color Ink = WpfUi.Ink;
+        private static readonly Color Sub = WpfUi.Sub;
+        private static readonly Color Line = WpfUi.Line;
+        private static readonly Color FieldBg = WpfUi.FieldBg;
+        private static readonly Color Accent = WpfUi.Accent;
 
         private readonly TextBox hostBox = new TextBox();
         private readonly TextBox portBox = new TextBox();
@@ -34,14 +36,21 @@ namespace TypeBridgeApp
         private readonly Switch linkSwitch = new Switch();
         private readonly Switch edgeSwitchToggle = new Switch();
         private readonly Switch reverseSwitch = new Switch();
+        private readonly Switch autoStartSwitch = new Switch();
+        private readonly Switch desktopShortcutSwitch = new Switch();
+        private readonly Switch startMenuSwitch = new Switch();
         private readonly ScreenArranger arranger = new ScreenArranger();
         private readonly TextBlock errorText = new TextBlock();
         private readonly string initialEdge;
         private readonly string initialOffset;
+        private readonly IntegrationState integration;
 
         private bool linkMouse;
         private bool edgeSwitch;
         private bool reverseEnable;
+        private bool autoStart;
+        private bool desktopShortcut;
+        private bool startMenuShortcut;
 
         [System.Runtime.InteropServices.DllImport("dwmapi.dll", PreserveSig = true)]
         private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
@@ -64,6 +73,10 @@ namespace TypeBridgeApp
         /// <summary>是否允许 Ubuntu 端反向控制本机，对应 ini 里的 reverse_enable。</summary>
         internal bool ReverseEnable { get { return reverseEnable; } }
 
+        internal bool AutoStart { get { return autoStart; } }
+        internal bool DesktopShortcut { get { return desktopShortcut; } }
+        internal bool StartMenuShortcut { get { return startMenuShortcut; } }
+
         /// <summary>只接受守护进程认识的四个方向，缺省与 BridgeApplicationContext 一致（Ubuntu 在右）。</summary>
         private static string NormalizeEdge(string value)
         {
@@ -75,7 +88,8 @@ namespace TypeBridgeApp
         internal WpfSettingsWindow(string host, int port, Hotkey keyboardHotkey, Hotkey mouseHotkey,
             bool linkMouseValue, bool edgeSwitchValue, string switchEdgeValue,
             string recvDirValue, string remoteDirValue,
-            bool firstRun, string layoutOffsetValue, bool reverseEnableValue)
+            bool firstRun, string layoutOffsetValue, bool reverseEnableValue,
+            IntegrationState integrationValue)
         {
             Host = host;
             Port = port;
@@ -86,6 +100,10 @@ namespace TypeBridgeApp
             linkMouse = linkMouseValue;
             edgeSwitch = edgeSwitchValue;
             reverseEnable = reverseEnableValue;
+            integration = integrationValue;
+            autoStart = integrationValue != null && integrationValue.AutoStart;
+            desktopShortcut = integrationValue != null && integrationValue.DesktopShortcut;
+            startMenuShortcut = integrationValue != null && integrationValue.StartMenuShortcut;
             initialEdge = NormalizeEdge(switchEdgeValue);
             initialOffset = layoutOffsetValue ?? string.Empty;
 
@@ -332,6 +350,28 @@ namespace TypeBridgeApp
             fileBody.Children.Add(Field(remoteBox));
             stack.Children.Add(fileCard);
 
+            StackPanel startupBody = new StackPanel();
+            UIElement startupCard = Card("开机与快捷方式", startupBody);
+            autoStartSwitch.IsOn = autoStart;
+            autoStartSwitch.Toggled += delegate { autoStart = autoStartSwitch.IsOn; };
+            startupBody.Children.Add(ToggleRow(autoStartSwitch,
+                "开机自动启动", "登录 Windows 后自动在托盘运行，不用每次手动打开"));
+            desktopShortcutSwitch.IsOn = desktopShortcut;
+            desktopShortcutSwitch.Toggled += delegate { desktopShortcut = desktopShortcutSwitch.IsOn; };
+            startupBody.Children.Add(ToggleRow(desktopShortcutSwitch,
+                "桌面快捷方式", "在桌面放一个 TypeBridge 图标"));
+            startMenuSwitch.IsOn = startMenuShortcut;
+            startMenuSwitch.Toggled += delegate { startMenuShortcut = startMenuSwitch.IsOn; };
+            startupBody.Children.Add(ToggleRow(startMenuSwitch,
+                "开始菜单快捷方式", "在开始菜单和应用列表里显示 TypeBridge"));
+            string integrationTarget = integration != null
+                ? integration.ExecutablePath : WindowsInstall.CurrentExecutable;
+            startupBody.Children.Add(Note(integration != null && integration.Installed
+                ? "当前已安装到 " + integration.InstallDirectory
+                : "当前是免安装运行，快捷方式指向 " + integrationTarget
+                    + "；想固定到本机请运行 TypeBridgeSetup.exe"));
+            stack.Children.Add(startupCard);
+
             errorText.Foreground = new SolidColorBrush(Color.FromRgb(198, 52, 52));
             errorText.FontSize = 12;
             errorText.Margin = new Thickness(2, 2, 0, 0);
@@ -458,34 +498,6 @@ namespace TypeBridgeApp
             return cardHost;
         }
 
-        /// <summary>开关 + 标题 + 说明的一行，用于边缘切屏这类总开关。</summary>
-        private static UIElement ToggleRow(Switch toggle, string title, string detail)
-        {
-            Grid row = new Grid { Margin = new Thickness(0, 14, 0, 0) };
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            row.ColumnDefinitions.Add(new ColumnDefinition());
-            row.Children.Add(toggle);
-
-            StackPanel text = new StackPanel
-            {
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(10, 0, 0, 0)
-            };
-            text.Children.Add(new TextBlock
-            {
-                Text = title,
-                FontSize = 14,
-                Foreground = new SolidColorBrush(Ink)
-            });
-            TextBlock sub = Note(detail);
-            sub.Margin = new Thickness(0, 2, 0, 0);
-            text.Children.Add(sub);
-
-            Grid.SetColumn(text, 1);
-            row.Children.Add(text);
-            return row;
-        }
-
         private UIElement BuildLinkRow()
         {
             Grid row = new Grid { Margin = new Thickness(0, 0, 0, 14) };
@@ -528,20 +540,8 @@ namespace TypeBridgeApp
             cancel.HorizontalAlignment = HorizontalAlignment.Right;
             cancel.Click += delegate { DialogResult = false; Close(); };
 
-            Button save = new Button
-            {
-                Content = "保存",
-                Width = 96,
-                Height = 38,
-                FontSize = 14,
-                FontWeight = FontWeights.SemiBold,
-                Cursor = Cursors.Hand,
-                Foreground = Brushes.White,
-                Background = new SolidColorBrush(Accent),
-                BorderThickness = new Thickness(0),
-                Template = RoundButtonTemplate()
-            };
-            AddHoverOpacity(save);
+            Button save = PrimaryButton("保存");
+            save.Width = 96;
             save.Click += delegate { Save(); };
             save.Margin = new Thickness(10, 0, 0, 0);
 
@@ -578,6 +578,17 @@ namespace TypeBridgeApp
                 && newKeyboard.Shift == newMouse.Shift && newKeyboard.Win == newMouse.Win)
             { Fail("键盘和鼠标快捷键不能相同，分开切换时鼠标快捷键会失效"); return; }
 
+            // 开机自启和快捷方式是系统状态，不进 ini；在这里应用，失败就把窗口留在原地让用户改
+            string exePath = integration != null && !string.IsNullOrEmpty(integration.ExecutablePath)
+                ? integration.ExecutablePath : WindowsInstall.CurrentExecutable;
+            string integrationError;
+            if (!WindowsInstall.ApplySettings(exePath, autoStart, startMenuShortcut, desktopShortcut,
+                    WindowsInstall.LayoutFor(exePath), out integrationError))
+            {
+                Fail("无法更新开机启动或快捷方式：" + integrationError);
+                return;
+            }
+
             Host = newHost;
             Port = newPort;
             KeyboardHotkey = newKeyboard;
@@ -594,178 +605,47 @@ namespace TypeBridgeApp
             errorText.Visibility = Visibility.Visible;
         }
 
-        // ---------- 控件工厂 ----------
+        // ---------- 控件工厂（共用实现见 WpfUi） ----------
+
+        private static UIElement ToggleRow(Switch toggle, string title, string detail)
+        {
+            return WpfUi.ToggleRow(toggle, title, detail);
+        }
 
         private static UIElement Card(string title, StackPanel body)
         {
-            body.Children.Add(new TextBlock
-            {
-                Text = title,
-                FontSize = 14,
-                FontWeight = FontWeights.Bold,
-                Foreground = new SolidColorBrush(Color.FromRgb(52, 66, 92)),
-                Margin = new Thickness(0, 0, 0, 12)
-            });
-
-            Grid host = new Grid { Margin = new Thickness(0, 0, 0, 10) };
-            Border shadowLayer = new Border
-            {
-                CornerRadius = new CornerRadius(14),
-                Background = Brushes.White,
-                Effect = Shadow(18, 3, 0.08)
-            };
-            Border card = new Border
-            {
-                CornerRadius = new CornerRadius(14),
-                Background = Brushes.White,
-                BorderThickness = new Thickness(1),
-                BorderBrush = new SolidColorBrush(Line),
-                Padding = new Thickness(16, 12, 16, 14),
-                Child = body
-            };
-            host.Children.Add(shadowLayer);
-            host.Children.Add(card);
-            return host;
+            return WpfUi.Card(title, body);
         }
 
         private static TextBlock Label(string text)
         {
-            return new TextBlock
-            {
-                Text = text,
-                FontSize = 13,
-                Foreground = new SolidColorBrush(Sub),
-                Margin = new Thickness(0, 0, 0, 6)
-            };
+            return WpfUi.Label(text);
         }
 
         private static TextBlock Note(string text)
         {
-            return new TextBlock
-            {
-                Text = text,
-                FontSize = 12,
-                Foreground = new SolidColorBrush(Color.FromRgb(100, 116, 139)),
-                Margin = new Thickness(0, 10, 0, 0),
-                TextWrapping = TextWrapping.Wrap
-            };
+            return WpfUi.Note(text);
         }
 
         private static UIElement Field(TextBox box)
         {
-            Border frame = new Border
-            {
-                CornerRadius = new CornerRadius(9),
-                Background = new SolidColorBrush(FieldBg),
-                BorderThickness = new Thickness(1),
-                BorderBrush = new SolidColorBrush(Color.FromRgb(226, 233, 245)),
-                Padding = new Thickness(10, 7, 10, 7)
-            };
-            box.BorderThickness = new Thickness(0);
-            box.Background = Brushes.Transparent;
-            box.FontSize = 14;
-            box.Foreground = new SolidColorBrush(Ink);
-            box.VerticalContentAlignment = VerticalAlignment.Center;
-            frame.Child = box;
-            return frame;
+            return WpfUi.Field(box);
         }
 
         private static UIElement Row(string label, UIElement control, double labelWidth)
         {
-            Grid row = new Grid { Margin = new Thickness(0, 0, 0, 10) };
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(labelWidth) });
-            row.ColumnDefinitions.Add(new ColumnDefinition());
-
-            TextBlock text = new TextBlock
-            {
-                Text = label,
-                FontSize = 14,
-                Foreground = new SolidColorBrush(Color.FromRgb(52, 66, 92)),
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            row.Children.Add(text);
-            Grid.SetColumn(control, 1);
-            row.Children.Add(control);
-            return row;
+            return WpfUi.Row(label, control, labelWidth);
         }
 
         private static Button SecondaryButton(string text)
         {
-            Button button = new Button
-            {
-                Content = text,
-                Height = 38,
-                Padding = new Thickness(16, 0, 16, 0),
-                FontSize = 13,
-                Cursor = Cursors.Hand,
-                Foreground = new SolidColorBrush(Color.FromRgb(58, 72, 96)),
-                Background = Brushes.White,
-                BorderThickness = new Thickness(1),
-                BorderBrush = new SolidColorBrush(Color.FromRgb(216, 224, 238)),
-                Template = RoundButtonTemplate()
-            };
-            AddHoverOpacity(button);
-            return button;
+            return WpfUi.SecondaryButton(text);
         }
 
-        private static ControlTemplate RoundButtonTemplate(double contentMargin = 16)
+        private static Button PrimaryButton(string text)
         {
-            FrameworkElementFactory border = new FrameworkElementFactory(typeof(Border));
-            border.SetValue(Border.CornerRadiusProperty, new CornerRadius(9));
-            border.SetBinding(Border.BackgroundProperty, new System.Windows.Data.Binding("Background")
-            {
-                RelativeSource = new System.Windows.Data.RelativeSource(System.Windows.Data.RelativeSourceMode.TemplatedParent)
-            });
-            border.SetBinding(Border.BorderBrushProperty, new System.Windows.Data.Binding("BorderBrush")
-            {
-                RelativeSource = new System.Windows.Data.RelativeSource(System.Windows.Data.RelativeSourceMode.TemplatedParent)
-            });
-            border.SetBinding(Border.BorderThicknessProperty, new System.Windows.Data.Binding("BorderThickness")
-            {
-                RelativeSource = new System.Windows.Data.RelativeSource(System.Windows.Data.RelativeSourceMode.TemplatedParent)
-            });
-
-            FrameworkElementFactory presenter = new FrameworkElementFactory(typeof(ContentPresenter));
-            presenter.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
-            presenter.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
-            presenter.SetValue(FrameworkElement.MarginProperty, new Thickness(contentMargin, 0, contentMargin, 0));
-            border.AppendChild(presenter);
-
-            return new ControlTemplate(typeof(Button)) { VisualTree = border };
+            return WpfUi.PrimaryButton(text);
         }
-
-        private static void AddHoverOpacity(Button button)
-        {
-            Style style = new Style(typeof(Button));
-            Trigger hover = new Trigger { Property = IsMouseOverProperty, Value = true };
-            hover.Setters.Add(new Setter(OpacityProperty, 0.82));
-            style.Triggers.Add(hover);
-            button.Style = style;
-        }
-
-        /// <summary>标题栏按钮默认透明，靠悬停底色提示可点击。</summary>
-        private static void AddChromeButtonHover(Button button)
-        {
-            Style style = new Style(typeof(Button));
-            Trigger hover = new Trigger { Property = IsMouseOverProperty, Value = true };
-            hover.Setters.Add(new Setter(BackgroundProperty,
-                new SolidColorBrush(Color.FromRgb(226, 233, 245))));
-            style.Triggers.Add(hover);
-            button.Style = style;
-        }
-
-        private static DropShadowEffect Shadow(double blur, double depth, double opacity)
-        {
-            return new DropShadowEffect
-            {
-                BlurRadius = blur,
-                ShadowDepth = depth,
-                Direction = 270,
-                Opacity = opacity,
-                Color = Color.FromRgb(23, 43, 77)
-            };
-        }
-
 
         // ---------- 内部控件 ----------
 
@@ -818,81 +698,6 @@ namespace TypeBridgeApp
                 text.Foreground = new SolidColorBrush(Value == null ? Sub : Ink);
             }
 
-        }
-
-        /// <summary>胶囊开关。</summary>
-        private sealed class Switch : Grid
-        {
-            private readonly Border track = new Border
-            {
-                Width = 46,
-                Height = 26,
-                CornerRadius = new CornerRadius(13),
-                Background = new SolidColorBrush(Color.FromRgb(214, 222, 236))
-            };
-            private readonly Ellipse knob = new Ellipse
-            {
-                Width = 20,
-                Height = 20,
-                Fill = Brushes.White,
-                HorizontalAlignment = HorizontalAlignment.Left,
-                Margin = new Thickness(3, 0, 0, 0),
-                Effect = Shadow(6, 1, 0.25)
-            };
-
-            private bool on;
-            internal event EventHandler Toggled;
-
-            internal bool IsOn
-            {
-                get { return on; }
-                set { on = value; Apply(false); }
-            }
-
-            internal Switch()
-            {
-                Width = 46;
-                Height = 26;
-                Cursor = Cursors.Hand;
-                VerticalAlignment = VerticalAlignment.Center;
-                Children.Add(track);
-                Children.Add(knob);
-                MouseLeftButtonUp += delegate
-                {
-                    on = !on;
-                    Apply(true);
-                    EventHandler handler = Toggled;
-                    if (handler != null) handler(this, EventArgs.Empty);
-                };
-            }
-
-            private void Apply(bool animate)
-            {
-                Color target = on ? Accent : Color.FromRgb(214, 222, 236);
-                if (animate)
-                {
-                    ColorAnimation color = new ColorAnimation(target, TimeSpan.FromMilliseconds(140));
-                    track.Background = new SolidColorBrush(((SolidColorBrush)track.Background).Color);
-                    track.Background.BeginAnimation(SolidColorBrush.ColorProperty, color);
-                }
-                else
-                {
-                    track.Background = new SolidColorBrush(target);
-                }
-
-                double shift = on ? 20 : 0;
-                if (animate)
-                {
-                    TranslateTransform transform = knob.RenderTransform as TranslateTransform ?? new TranslateTransform();
-                    knob.RenderTransform = transform;
-                    transform.BeginAnimation(TranslateTransform.XProperty,
-                        new DoubleAnimation(shift, TimeSpan.FromMilliseconds(150)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
-                }
-                else
-                {
-                    knob.RenderTransform = new TranslateTransform(shift, 0);
-                }
-            }
         }
 
         /// <summary>两块屏幕的摆放区，可拖动吸附。</summary>
