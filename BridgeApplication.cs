@@ -107,10 +107,8 @@ namespace TypeBridgeApp
         private DateTime lastMouseToggleUtc;
         private readonly Timer clipboardTimer = new Timer();
         private string lastLocalClip;
-        private string lastRemoteClip;
         // 图片走文件通道（CLIPIMG）传输，用 PNG 的 MD5 做去重指纹
         private string lastLocalImageKey;
-        private bool suppressImageEcho;
         private int imageSending;
         private System.Threading.Thread readerThread;
         private volatile bool readerRunning;

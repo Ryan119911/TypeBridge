@@ -151,13 +151,16 @@ Ubuntu 端配置在 `~/.config/typebridge/config.json`：
   "auto_deactivate_fcitx": false,
   "reverse_share": true,
   "hotkey": "ctrl+alt+u",
-  "edge_entry": true
+  "edge_entry": true,
+  "file_send_host": ""
 }
 ```
 
 `auto_deactivate_fcitx` 必须保持 `false`，否则拼音进不了输入法。
 
 `reverse_share` 关掉后不再注册全局热键、也不做边缘进入（托盘菜单里的接管仍可用）；`hotkey` 是反向切换键，写法与按键协议一致（`ctrl+alt+u`、`super+grave`，也可以单独用一个 `ScrollLock`）；`edge_entry` 控制"指针顶到共享边停半秒就切过去"。改完 `systemctl --user restart typebridge` 生效。
+
+`file_send_host` 用于指定 Ubuntu 向 Windows 发送文件和剪贴板图片的目标地址。默认留空，跟随已确认的 Windows 控制连接；探测连接不会改变目标，控制连接断开后暂停发送。如果键鼠已连接、文件却因多网卡或代理路由无法返回，可填 Ubuntu 能访问的 **Windows 地址**（例如 Windows 的 Tailscale IP，不带端口），并确保 Windows 文件接收端口（默认 `4323`）可达。修改后重启上述用户服务生效。
 
 </details>
 
@@ -315,6 +318,7 @@ Windows 端使用全局键盘/鼠标钩子：只在 Ubuntu 模式下拦截并转
 本地构建：Windows 双击 `build.bat`（用系统自带 .NET Framework，不需要 Visual Studio），会同时产出 `TypeBridge.exe` 和 `TypeBridgeSetup.exe`（安装器把主程序内嵌在里面）；Ubuntu 上 `VERSION=<版本> bash ubuntu/build-deb.sh`，产物在 `dist/`。
 
 Windows 回归测试运行 `powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1 -Test`。
+鼠标回调回归测试运行 `powershell -NoProfile -ExecutionPolicy Bypass -File tests/Run-DesktopChecks.ps1 -Executable ./TypeBridge.Tests.exe -Argument --clipboard-sync`，在独立的 Windows 桌面中验证程序移动不会误收回控制、真实移动和点击仍可收回。
 Ubuntu 回归测试运行 `python3 tests/run_linux.py`，需要 `xvfb`、`x11-utils` 以及正常运行所需的 GTK 和 xdotool。测试在独立的 X11 显示 `:97` 中运行。
 
 Windows 的连接、剪贴板、文件、反向控制和输入钩子分别放在 `BridgeTransport.cs`、`BridgeClipboard.cs`、`BridgeFiles.cs`、`BridgeReverse.cs` 和 `InputHooks.cs`。`ControlProtocol.cs` 管理分帧与有界发送队列。Ubuntu 的文件传输和协议缓冲位于 `typebridge_files.py` 与 `typebridge_protocol.py`。这些模块使用系统运行时和标准库。

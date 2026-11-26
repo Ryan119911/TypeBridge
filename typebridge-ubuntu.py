@@ -145,6 +145,7 @@ DEFAULT_CONF = {
     "port": 4321,
     "file_port": 4322,               # 文件接收端口，0 表示关闭
     "file_dir": "",                 # 空 = 自动用系统桌面目录
+    "file_send_host": "",           # 空 = 已确认的控制连接；跨网段可指定 Windows 可达地址
     "auto_deactivate_fcitx": False,  # 本项目的拼音由 Ubuntu 输入法处理，不能自动关闭 fcitx
     "xdotool_delay_ms": 5,           # ASCII 逐字间隔
     # ---- 反向共享（用本机键鼠操作 Windows）----
@@ -244,7 +245,7 @@ def normalize_key(payload):
 CONF = dict(DEFAULT_CONF)
 ROUTES = {}
 CONNS = {}   # fileno -> {"sock":, "addr":, "buf": bytes}
-LAST_PEER = {"addr": None}   # 最近一个非本机客户端（Windows）
+LAST_PEER = {"addr": None, "sock": None}   # 已确认的 Windows 控制连接；探测连接不能抢走文件路由
 
 
 def log(msg):
@@ -1560,12 +1561,9 @@ def _tray_toggle_reverse(_item=None):
 
 _clipboard = None
 _clipboard_state = {
-    "applied": "",          # 刚由 Windows 写进来的文本
-    "sent": "",             # 刚推给 Windows 的文本
+    "sent": "",             # 当前已观测或由远端写入的文本
     "primed": False,        # 启动基线：避免一连上就把旧内容推给对端
-    "image_applied": None,  # 刚由 Windows 写进来的图片（PNG 字节）
-    "image_sent": None,     # 刚推给 Windows 的图片（PNG 字节）
-    "suppress_image": False,
+    "image_sent": None,     # 当前已观测或由远端写入的图片（规范化 PNG）
 }
 _seq = {"clip": 0}
 
@@ -1583,10 +1581,11 @@ def set_clipboard(text):
     """Windows -> Ubuntu：把文本写进本机剪贴板。"""
     if not isinstance(text, str) or not text:
         return
-    _clipboard_state["applied"] = text
     try:
         cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         cb.set_text(text, -1)
+        # 去重只描述当前内容；远端写入文本后，之前的图片已不在剪贴板里。
+        _clipboard_state.update(sent=text, primed=True, image_sent=None)
         cb.store()
         log("clipboard <- windows (%d chars)" % len(text))
     except Exception as e:
@@ -1690,12 +1689,6 @@ def set_clipboard_image(data, text=None):
     """Windows -> Ubuntu：把图片（可带文本）写进本机剪贴板（必须在主循环线程里调用）。"""
     if not data:
         return
-    _clipboard_state["image_applied"] = data
-    if text:
-        _clipboard_state["applied"] = text
-    # 自己成为剪贴板 owner 后 GTK 会再发一次 owner-change，回读出来重新编码的
-    # PNG 跟原图不一定逐字节相同，所以这里用标志把回声拦掉。
-    _clipboard_state["suppress_image"] = True
     try:
         loader = GdkPixbuf.PixbufLoader()
         loader.write(data)
@@ -1707,18 +1700,24 @@ def set_clipboard_image(data, text=None):
     if pixbuf is None:
         log("clipboard image decode failed: empty pixbuf")
         return
+    # 与 request_image 的回读使用同一编码，按实际内容消除回声。
+    # 不能用“一次性跳过下一张图”的标志：异步回读被新复制打断时会吞掉用户的新图。
     try:
+        ok, canonical = pixbuf.save_to_bufferv("png", [], [])
+        if not ok:
+            return
         cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         if text:
             if not _own_image_and_text(data, text):
                 # 双格式挂不上就退回纯文本：宁可文字能粘，
                 # 也不要让剪贴板变成一个什么都粘不出来的状态
-                cb.set_text(text, -1)
-                cb.store()
+                set_clipboard(text)
                 log("clipboard: 双格式不可用，退回纯文本")
                 return
         else:
             cb.set_image(pixbuf)
+        _clipboard_state.update(sent=text or "", primed=True, image_sent=canonical)
+        if not text:
             cb.store()
         log("clipboard <- windows image (%dx%d, %d bytes, text %d chars)"
             % (pixbuf.get_width(), pixbuf.get_height(), len(data), len(text or "")))
@@ -1730,7 +1729,7 @@ def push_clipboard_image(data):
     """Ubuntu -> Windows：走文件通道把 PNG 推过去，由 Windows 端写进剪贴板。"""
     if not data:
         return
-    peer = LAST_PEER["addr"]
+    peer = file_target_host()
     if not peer:
         log("clipboard image: 还没有 Windows 连进来")
         return
@@ -1760,17 +1759,14 @@ def _clipboard_image_seen(pixbuf):
         return
     if not ok or not data:
         return
-    if _clipboard_state["suppress_image"]:
-        _clipboard_state["suppress_image"] = False
-        _clipboard_state["image_sent"] = data
-        return
     if not _clipboard_state["primed"]:
         _clipboard_state["primed"] = True
-        _clipboard_state["image_sent"] = data
+        if _seq["clip"] == 0:
+            _clipboard_state["image_sent"] = data
+            return
+    if data == _clipboard_state["image_sent"]:
         return
-    if data == _clipboard_state["image_sent"] or data == _clipboard_state["image_applied"]:
-        return
-    _clipboard_state["image_sent"] = data
+    _clipboard_state.update(image_sent=data, sent="")
     log("clipboard image -> windows (%d bytes)" % len(data))
     threading.Thread(target=push_clipboard_image, args=(data,), daemon=True).start()
 
@@ -1792,17 +1788,18 @@ def _clipboard_text_ready(clipboard, text, user_data):
     seq = user_data
     if seq is not None and seq != _seq["clip"]:
         return
+    text = text or ""
+    if not _clipboard_state["primed"]:
+        # 空剪贴板同样完成启动基线；owner-change 已发生则是用户的新复制。
+        _clipboard_state["primed"] = True
+        if seq == 0:
+            _clipboard_state["sent"] = text
+            return
+    if text == _clipboard_state["sent"] and _clipboard_state["image_sent"] is None:
+        return
+    _clipboard_state.update(sent=text, image_sent=None)
     if not text:
         return
-    if not _clipboard_state["primed"]:
-        # 启动时先记下现有内容当基线，避免连上就把旧内容推给客户端
-        _clipboard_state["primed"] = True
-        _clipboard_state["sent"] = text
-        return
-    if text == _clipboard_state["applied"] or text == _clipboard_state["sent"]:
-        return
-    _clipboard_state["sent"] = text
-    _clipboard_state["image_sent"] = None
     log("clipboard -> windows (%d chars)" % len(text))
     broadcast("C " + json.dumps(text))
 
@@ -2049,6 +2046,27 @@ def refresh_tray():
         log("tray refresh failed: %r" % (e,))
 
 
+def file_target_host():
+    """文件返回路径可能与键鼠控制连接不同；只有 Windows 在线时才发送。"""
+    peer = LAST_PEER["addr"]
+    if not peer:
+        return None
+    return str(CONF.get("file_send_host") or "").strip() or peer
+
+
+def confirm_file_peer(sock):
+    """SW 只由选定的控制连接发送；PING 探测和本机 CLI 不改变文件目标。"""
+    st = CONNS.get(sock.fileno())
+    if st is None or st["sock"] is not sock or st["addr"][0].startswith("127."):
+        return
+    st["windows_peer"] = True
+    address = st["addr"][0]
+    changed = LAST_PEER["addr"] != address
+    LAST_PEER.update(addr=address, sock=sock)
+    if changed:
+        log("file target -> %s (confirmed control %s)" % (file_target_host(), address))
+
+
 def handle_line(line, sock):
     """返回 False 表示对端请求断开(QUIT)"""
     if line == "PING":
@@ -2082,12 +2100,8 @@ def handle_line(line, sock):
             pass
         return True
     if line == "PEER":
-        # 拖放区要问：最近连进来的 Windows 是哪台。
-        # 调用者自己是 127.0.0.1，必须用记录下来的真实客户端地址。
-        addr = LAST_PEER["addr"]
-        if not addr:
-            st = CONNS.get(sock.fileno())
-            addr = st["addr"][0] if st else "0.0.0.0"
+        # 拖放区通过本机连接查询；尚未确认 Windows 时不能返回探测地址或本机。
+        addr = file_target_host() or "0.0.0.0"
         try:
             _conn_send(sock, ("PEER " + addr + "\n").encode("utf-8"))
         except OSError:
@@ -2121,13 +2135,16 @@ def handle_line(line, sock):
         parts = line.split()
         if len(parts) >= 4:
             try:
-                _RWIN["win_w"] = int(parts[1])
-                _RWIN["win_h"] = int(parts[2])
+                width, height = int(parts[1]), int(parts[2])
             except ValueError:
-                pass
+                return True
+            if width <= 0 or height <= 0:
+                return True
+            _RWIN["win_w"], _RWIN["win_h"] = width, height
             side = parts[3].strip().lower()
             if side in ("left", "right", "top", "bottom"):
                 _RWIN["side"] = side
+                confirm_file_peer(sock)
             log("reverse share: Windows 在%s侧 %dx%d"
                 % (side, _RWIN["win_w"], _RWIN["win_h"]))
         return True
@@ -2243,8 +2260,6 @@ def on_accept(fd, cond):
         conn, addr = srv.accept()
     except (BlockingIOError, OSError):
         return True
-    if not addr[0].startswith("127."):
-        LAST_PEER["addr"] = addr[0]
     # 关掉 Nagle：心跳和按键都是小包，等延迟 ACK 会让 RTT 虚高 40ms，
     # 输入也会发黏
     try:
@@ -2319,6 +2334,14 @@ def drop(fd, msg):
             except Exception:
                 pass
             st["out_watch"] = 0
+        if LAST_PEER.get("sock") is st["sock"]:
+            LAST_PEER.update(addr=None, sock=None)
+            for candidate in reversed(list(CONNS.values())):
+                if candidate.get("windows_peer"):
+                    confirm_file_peer(candidate["sock"])
+                    break
+            if LAST_PEER["addr"] is None:
+                log("file target cleared (control disconnected)")
         # 正在用这台机器驱动 Windows 时链路断了：必须立刻放开抓取，
         # 否则用户会被锁在自己的桌面外面（X 只在进程退出时才自动释放）
         if _RWIN["active"] and _RWIN["sock"] is st["sock"]:
@@ -2387,7 +2410,7 @@ OUTBOX_NEXT_TRY = {}
 
 def outbox_worker(path):
     try:
-        peer = LAST_PEER["addr"]
+        peer = file_target_host()
         if not peer:
             return
         port = int(CONF.get("file_recv_port", 4323))

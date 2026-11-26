@@ -791,10 +791,12 @@ namespace TypeBridgeApp
         internal event EventHandler LocalInput;
         private int lastLocalInputTick;
 
-        private void DetectLocalInput(IntPtr lParam)
+        private void DetectLocalInput(IntPtr wParam, IntPtr lParam)
         {
             MouseData data = (MouseData)Marshal.PtrToStructure(lParam, typeof(MouseData));
             if ((data.Flags & 1) != 0)      // LLMHF_INJECTED：我们自己注入的
+                return;
+            if (wParam.ToInt32() == WmMouseMove && RemoteInput.ConsumeCursorWarp(data.X, data.Y))
                 return;
             int now = Environment.TickCount;
             if (unchecked(now - lastLocalInputTick) < 200)
@@ -1024,7 +1026,7 @@ namespace TypeBridgeApp
             // 先挪到位再显示：否则光标会先在中间露一帧再跳过去
             if (hasRestore)
             {
-                SetCursorPos(restoreX, restoreY);
+                RemoteInput.SetPosition(new Point(restoreX, restoreY));
                 hasRestore = false;
             }
             ShowSystemCursor();
@@ -1074,7 +1076,7 @@ namespace TypeBridgeApp
                     // 少了这条，一旦对端没主动交还，本机会一直停在反向接管态，
                     // 鼠标怎么动都没反应（用户实测踩到）。
                     if (LocalWatch)
-                        DetectLocalInput(lParam);
+                        DetectLocalInput(wParam, lParam);
                     return CallNextHookEx(hook, nCode, wParam, lParam);
                 }
 

@@ -24,6 +24,12 @@ namespace TypeBridgeApp
         [STAThread]
         private static void Main(string[] args)
         {
+            if (args.Length > 0 && args[0] == "--clipboard-sync")
+            {
+                try { ClipboardAndTakeoverChecks.Run(); }
+                catch (Exception error) { Console.WriteLine(error.Message); Environment.ExitCode = 1; }
+                return;
+            }
             if (args.Length > 0 && args[0] == "--edge-runtime")
             {
                 try { EdgeSwitchChecks.Run(); }
@@ -43,6 +49,8 @@ namespace TypeBridgeApp
                 return;
             }
             List<string> lines = new List<string>();
+            try { ClipboardAndTakeoverChecks.ClipboardRetries(); }
+            catch (Exception error) { Console.WriteLine(error.Message); Environment.ExitCode = 1; return; }
             try { EdgeSwitchChecks.ReverseChecks(); }
             catch (Exception error) { Console.WriteLine(error.Message); Environment.ExitCode = 1; return; }
             LineFramer framer = new LineFramer();

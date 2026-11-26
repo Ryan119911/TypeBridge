@@ -139,8 +139,7 @@ namespace TypeBridgeApp
                     y = MapRange(yNorm, 65535, b.Height, b.Top);
                     break;
             }
-            try { Cursor.Position = new Point(x, y); }
-            catch { }
+            RemoteInput.SetPosition(new Point(x, y));
 
             SendLine("RGW ok");
             Log.Write("remote drive start (edge=" + switchEdge + ", y=" + yNorm + ")");

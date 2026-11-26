@@ -16,9 +16,13 @@ namespace TypeBridgeApp
     internal sealed partial class BridgeApplicationContext
     {
         // ---------- 剪贴板 ----------
+        private readonly ClipboardWriteQueue remoteClipboardWrites = new ClipboardWriteQueue(Log.Write);
 
         private void PollClipboard()
         {
+            if (disposed) return;
+            remoteClipboardWrites.Retry(GetClipboardSequenceNumber());
+            if (remoteClipboardWrites.Pending) return;
             if (stream == null || disposed)
                 return;
 
@@ -26,23 +30,6 @@ namespace TypeBridgeApp
             uint seq = GetClipboardSequenceNumber();
             if (seq == lastClipboardSeq)
                 return;
-            lastClipboardSeq = seq;
-
-            // 远端刚写进来的图文：无论回读能否解码成位图都要消费掉回声标志，
-            // 否则标志会残留到下一轮，把用户自己复制的新图当成回声吞掉。
-            if (suppressImageEcho)
-            {
-                suppressImageEcho = false;
-                try
-                {
-                    string echoedText = Clipboard.ContainsText() ? Clipboard.GetText() : string.Empty;
-                    byte[] echoed = ClipboardImageToPng();
-                    if (echoed != null)
-                        lastLocalImageKey = ImageKey(echoed, echoedText);
-                }
-                catch { }
-                return;
-            }
 
             string text = string.Empty;
             byte[] image = null;
@@ -58,6 +45,10 @@ namespace TypeBridgeApp
             {
                 return;
             }
+            // 读取失败时保留旧序号，下次轮询重试。远端写入在成功时记录其序号，
+            // 不再无条件跳过“下一次变化”，避免把用户刚复制的新内容当成回声。
+            if (seq != GetClipboardSequenceNumber()) return;
+            lastClipboardSeq = seq;
 
             if (image != null)
             {
@@ -75,12 +66,12 @@ namespace TypeBridgeApp
                 return;
             }
 
-            if (text == lastLocalClip)
+            if (text == lastLocalClip && lastLocalImageKey == null)
                 return;
             lastLocalClip = text;
-            if (text.Length == 0 || text == lastRemoteClip)
-                return;
             lastLocalImageKey = null;
+            if (text.Length == 0)
+                return;
             SendLine("C " + json.Serialize(text));
         }
 
@@ -201,18 +192,23 @@ namespace TypeBridgeApp
         {
             if (string.IsNullOrEmpty(text))
                 return;
-            lastRemoteClip = text;
-            lastLocalClip = text;
-            lastLocalImageKey = null;
-            try { Clipboard.SetText(text); }
-            catch { }
+            remoteClipboardWrites.Enqueue(delegate
+            {
+                DataObject payload = new DataObject();
+                payload.SetData(DataFormats.UnicodeText, true, text);
+                Clipboard.SetDataObject(payload, true, 0, 0);
+                lastLocalClip = text;
+                lastLocalImageKey = null;
+                lastClipboardSeq = GetClipboardSequenceNumber();
+                Log.Write("clipboard <- ubuntu text (" + text.Length + " chars)");
+            }, GetClipboardSequenceNumber());
         }
 
         private void ApplyRemoteClipboardImage(byte[] png, string text)
         {
             if (png == null || png.Length == 0)
                 return;
-            try
+            remoteClipboardWrites.Enqueue(delegate
             {
                 // DataObject 会持有 Bitmap 供剪贴板按需序列化，成功时不能 Dispose；
                 // 但 SetDataObject 抛异常（剪贴板被别的程序占用很常见）时要释放，
@@ -230,7 +226,7 @@ namespace TypeBridgeApp
                     payload.SetData(DataFormats.Bitmap, true, image);
                     if (!string.IsNullOrEmpty(text))
                         payload.SetData(DataFormats.UnicodeText, true, text);
-                    Clipboard.SetDataObject(payload, true);
+                    Clipboard.SetDataObject(payload, true, 0, 0);
                     handedOff = true;
                 }
                 finally
@@ -239,17 +235,12 @@ namespace TypeBridgeApp
                         image.Dispose();
                 }
 
-                suppressImageEcho = true;
-                lastLocalImageKey = null;
+                lastLocalImageKey = ImageKey(png, text);
                 lastLocalClip = text ?? string.Empty;
-                lastRemoteClip = text ?? string.Empty;
+                lastClipboardSeq = GetClipboardSequenceNumber();
                 Log.Write("clipboard <- ubuntu image (" + png.Length + " bytes, text "
                     + (text == null ? 0 : text.Length) + " chars)");
-            }
-            catch (Exception ex)
-            {
-                Log.Write("set clipboard image failed: " + ex.Message);
-            }
+            }, GetClipboardSequenceNumber());
         }
 
     }

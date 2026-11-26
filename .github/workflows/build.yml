@@ -40,6 +40,10 @@ jobs:
         shell: pwsh
         run: ./tests/Run-DesktopChecks.ps1 -Executable ./TypeBridge.Tests.exe -Argument --edge-runtime
 
+      - name: 验证远程鼠标移动与本机接管
+        shell: pwsh
+        run: ./tests/Run-DesktopChecks.ps1 -Executable ./TypeBridge.Tests.exe -Argument --clipboard-sync
+
       - name: 上传 Windows 程序
         uses: actions/upload-artifact@v4
         with:

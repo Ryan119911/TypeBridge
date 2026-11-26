@@ -221,6 +221,66 @@ class DaemonTests(unittest.TestCase):
         self.assertIsNotNone(actual)
         self.assertEqual((actual.get_width(), actual.get_height()), (3, 2))
 
+    def test_ubuntu_recopy_after_remote_change_reaches_control_socket(self):
+        import gi
+        gi.require_version('Gtk', '3.0')
+        from gi.repository import Gtk, Gdk, GLib
+        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        self.peer.send('C ' + json.dumps('remote original'))
+        self.peer.send('PING')
+        self.peer.until('PONG')
+        self.assertEqual(clipboard.wait_for_text(), 'remote original')
+
+        def expect_copy(value):
+            clipboard.set_text(value, -1)
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                while GLib.MainContext.default().pending():
+                    GLib.MainContext.default().iteration(False)
+                if select.select([self.peer.sock], [], [], .01)[0]:
+                    self.peer.buf += self.peer.sock.recv(65536)
+                while b'\n' in self.peer.buf:
+                    line, self.peer.buf = self.peer.buf.split(b'\n', 1)
+                    if line.startswith(b'C ') and json.loads(line[2:]) == value:
+                        return
+            self.fail('Ubuntu clipboard did not reach Windows control connection: ' + value)
+
+        expect_copy('local replacement')
+        expect_copy('remote original')
+
+    def test_reverse_grab_blocks_local_clicks(self):
+        import gi
+        gi.require_version('Gtk', '3.0')
+        from gi.repository import Gtk, GLib
+        window = Gtk.Window()
+        button = Gtk.Button(label='local click target')
+        clicks = []
+        button.connect('clicked', lambda *_: clicks.append(True))
+        window.add(button)
+        window.set_default_size(1280, 800)
+        window.show_all()
+        def pump():
+            deadline = time.monotonic() + .2
+            while time.monotonic() < deadline:
+                while GLib.MainContext.default().pending():
+                    GLib.MainContext.default().iteration(False)
+                time.sleep(.002)
+        try:
+            pump()
+            self.start_reverse()
+            subprocess.run(['xdotool', 'click', '1'], check=True)
+            self.peer.until('RB 1 down')
+            self.peer.until('RB 1 up')
+            pump()
+            self.assertEqual(clicks, [], 'a forwarded click also activated the Ubuntu button')
+            self.peer.send('RGW 0')
+            self.peer.send('PING')
+            self.peer.until('PONG')
+            pump()
+        finally:
+            window.destroy()
+            pump()
+
     def test_invalid_frame_disconnects_only_its_client(self):
         other = Peer(self.port)
         try:

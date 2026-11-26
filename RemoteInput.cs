@@ -92,6 +92,42 @@ namespace TypeBridgeApp
         private static readonly object gate = new object();
         private static readonly HashSet<string> downKeys = new HashSet<string>(StringComparer.Ordinal);
         private static readonly HashSet<int> downButtons = new HashSet<int>();
+        private struct CursorWarp
+        {
+            internal Point Position;
+            internal int Tick;
+        }
+        private static readonly List<CursorWarp> cursorWarps = new List<CursorWarp>();
+
+        internal static void SetPosition(Point position)
+        {
+            // SetCursorPos 产生的移动没有 LLMHF_INJECTED。先记下目标，钩子
+            // 才能区分本程序挪指针和用户真的移动本机鼠标。
+            lock (gate)
+            {
+                if (cursorWarps.Count >= 128) cursorWarps.RemoveAt(0);
+                cursorWarps.Add(new CursorWarp { Position = position, Tick = Environment.TickCount });
+            }
+            try { Cursor.Position = position; }
+            catch { }
+        }
+
+        internal static bool ConsumeCursorWarp(int x, int y)
+        {
+            lock (gate)
+            {
+                int now = Environment.TickCount;
+                cursorWarps.RemoveAll(delegate(CursorWarp warp) { return unchecked(now - warp.Tick) > 500; });
+                for (int i = cursorWarps.Count - 1; i >= 0; i--)
+                {
+                    if (cursorWarps[i].Position.X != x || cursorWarps[i].Position.Y != y) continue;
+                    // Windows 可以合并连续的移动消息，消费匹配项及其之前的目标。
+                    cursorWarps.RemoveRange(0, i + 1);
+                    return true;
+                }
+                return false;
+            }
+        }
 
         private static Dictionary<string, ushort> BuildVirtualKeys()
         {
@@ -216,8 +252,7 @@ namespace TypeBridgeApp
             if (x > screen.Right - 1) x = screen.Right - 1;
             if (y < screen.Top) y = screen.Top;
             if (y > screen.Bottom - 1) y = screen.Bottom - 1;
-            try { Cursor.Position = new Point(x, y); }
-            catch { }
+            SetPosition(new Point(x, y));
         }
 
         internal static void Button(int button, bool down)
